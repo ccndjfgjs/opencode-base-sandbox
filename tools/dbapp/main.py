@@ -21,14 +21,17 @@ if __package__ in (None, ""):
     import android_studio  # type: ignore[import-not-found]
     import bridges  # type: ignore[import-not-found]
     import browsers  # type: ignore[import-not-found]
+    import caveman  # type: ignore[import-not-found]
     import dbhub  # type: ignore[import-not-found]
     import lmarena  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
+    import rtk  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   browsers, dbhub, omniroute, program_cards, winget_install)
+                   browsers, caveman, dbhub, lmarena, omniroute, program_cards,
+                   rtk, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2721,6 +2724,8 @@ class CapsTab(ScrollPage):
         "ncp": "Мост NCP — память, библиотека, 7 инструментов",
         "agents": "12 агентов — поиск, план, код, проверка и другие",
         "antiblock": "Обход блокировок — запуск OpenCode через прокси, пул обновляется сам",
+        "rtk": "rtk — вывод команд короче (нужен rtk в PATH)",
+        "caveman": "caveman — ответы короче (правила в AGENTS.md)",
     }
 
     def __init__(self, parent=None) -> None:
@@ -2755,9 +2760,41 @@ class CapsTab(ScrollPage):
         self.checks: dict[str, QCheckBox] = {}
         for name, _title in opencode_caps.CAPS_CHOICES:
             box = QCheckBox(self.TITLES.get(name, name))
-            box.setChecked(True)
+            # rtk и caveman по умолчанию выключены: у rtk нужен бинарник в
+            # PATH, caveman меняет стиль ответов. Молча включать такое нельзя.
+            box.setChecked(name not in opencode_caps.CAPS_OFF_BY_DEFAULT)
+            if name == "rtk":
+                box.setToolTip(
+                    "Плагин opencode от автора rtk: команды агента пойдут "
+                    "через rtk и вернут меньше текста. Сам rtk ставится по "
+                    "README автора (winget install rtk-ai.rtk или готовый "
+                    "архив). Программа проверит rtk живым запросом и, если "
+                    "его нет или версия старая, ничего не впишет"
+                )
+            if name == "caveman":
+                box.setToolTip(
+                    "Правила коротких ответов в AGENTS.md между метками базы. "
+                    "Текст правил — из tools/thirdparty/caveman, автор "
+                    "JuliusBrussee (Apache-2.0). Снимается галочкой или "
+                    "словами «stop caveman»"
+                )
             what_layout.addWidget(box)
             self.checks[name] = box
+        # Уровень caveman — единственная возможность с выбором внутри
+        # галочки. Уровень берётся из списка, как выбор браузера в блоке MCP.
+        row_level = QHBoxLayout()
+        row_level.addWidget(QLabel("Уровень caveman:   "))
+        self.caveman_level = QComboBox()
+        self.caveman_level.addItem("лёгкий — базовые правила автора", "lite")
+        self.caveman_level.addItem("полный — ultracave, самая жёсткая ступень", "full")
+        self.caveman_level.setToolTip(
+            "Лёгкий: без вступлений и воды. Полный (ultracave): куски фраз и "
+            "«каждый факт один раз» — заметно жёстче, подходит не всем задачам. "
+            "Заявленную экономию 65–75% называет автор; проверки независимо нет, "
+            "в его же README у ultracave — 35%, у лёгкого — 3%"
+        )
+        row_level.addWidget(self.caveman_level, 1)
+        what_layout.addLayout(row_level)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -3110,11 +3147,20 @@ class CapsTab(ScrollPage):
         self.btn_install.clicked.connect(self._install)
         self.btn_remove = QPushButton("Убрать отмеченное")
         self.btn_remove.clicked.connect(self._remove)
+        self.btn_rtk_measure = QPushButton("Замерить rtk")
+        self.btn_rtk_measure.setToolTip(
+            "rtk: запустить одну и ту же длинную команду дважды — напрямую и "
+            "через rtk — и показать, сколько байт увидит нейросеть. Это и есть "
+            "проверка «вывод стал короче», числами. Ничего не записывает; "
+            "нет rtk — скажет прямо, что замер не сделан"
+        )
+        self.btn_rtk_measure.clicked.connect(self._rtk_measure)
         self.btn_refresh = QPushButton("Обновить состояние")
         self.btn_refresh.clicked.connect(self._refresh)
         buttons.addWidget(self.btn_install)
         buttons.addWidget(self.btn_remove)
         buttons.addStretch(1)
+        buttons.addWidget(self.btn_rtk_measure)
         buttons.addWidget(self.btn_refresh)
         outer.addLayout(buttons)
 
@@ -4239,6 +4285,35 @@ class CapsTab(ScrollPage):
         else:
             self.state_hint.setStyleSheet(f"color: {ui.TEXT_DIM};")
             self.state_hint.setText("Наших возможностей здесь пока нет.")
+        # Строка про rtk и caveman — отдельно от «уже стоит». Без неё
+        # галочка «rtk» выглядела бы рабочей, хотя без бинарника в PATH она
+        # ничего не впишет: программа обязана сказать это до нажатия.
+        try:
+            data = rtk.status(dest)
+        except Exception:
+            data = {}
+        try:
+            cword = str(caveman.status(dest).get("word") or "")
+        except Exception:
+            cword = ""
+        notes: list[str] = []
+        if data:
+            if data.get("binary"):
+                notes.append(
+                    "rtk: программа найдена"
+                    + (f" ({data['version']})" if data.get("version") else "")
+                    + "."
+                )
+            else:
+                notes.append(
+                    "rtk: программа не найдена в PATH — включение ничего не "
+                    "впишет, пока она не поставлена по README автора."
+                )
+        notes.append(
+            "caveman: сейчас уровень «" + (cword or "лёгкий")
+            + "», галочка выберет тот, что стоит в списке."
+        )
+        self.state_hint.setText(self.state_hint.text() + "\n" + "\n".join(notes))
 
     # ---- выбор папки
 
@@ -4307,6 +4382,9 @@ class CapsTab(ScrollPage):
             self._warn("Ничего не отмечено — отметьте хотя бы одну галочку.")
             return
         base = self._base()
+        # Уровень caveman читаем здесь, в главном потоке: из рабочего потока
+        # трогать виджеты нельзя.
+        level = str(self.caveman_level.currentData() or "lite")
 
         def job(progress):
             m1, e1 = ([], [])
@@ -4315,6 +4393,7 @@ class CapsTab(ScrollPage):
                 m1, e1 = opencode_caps.install_caps(
                     base, dest, selection, progress=progress,
                     antiblock_opts=self._antiblock_opts(),
+                    caveman_level=level,
                 )
             if pselection:
                 # У LMArena блок провайдера собирается из живого моста:
@@ -4351,6 +4430,13 @@ class CapsTab(ScrollPage):
             return (m1 + m2, e1 + e2)
 
         self._start(job, "install")
+
+    def _rtk_measure(self) -> None:
+        """Замер rtk: длинная команда дважды, числами. Ничего не записывает."""
+        def job(progress):
+            return rtk.measure()
+
+        self._start(job, "measure")
 
     def _remove(self) -> None:
         dest = self._dest()

@@ -2956,7 +2956,11 @@ def main() -> int:
     # Ставим все пресеты, сколько их есть: «статус видит пресеты» ниже
     # проверяет список целиком, и незамеченный новый пресет ронял бы
     # проверку не по делу.
-    psel = set(opencode_caps.PROVIDER_PRESETS)
+    # Пресеты, которые собираются из живого ответа моста (lmarena),
+    # в общий набор не берём: их блок нельзя выдумывать, а мост в
+    # самопроверке может быть не запущен. Честный отказ для них —
+    # отдельная проверка ниже.
+    psel = set(opencode_caps.PROVIDER_PRESETS) - set(opencode_caps.PROVIDER_DYNAMIC)
     _, perrors = opencode_caps.install_providers(fake, psel)
     check(not perrors, f"провайдеры вписаны без ошибок: {perrors or 'чисто'}")
     pcfg = (fake / "opencode.jsonc").read_text(encoding="utf-8")
@@ -2972,7 +2976,24 @@ def main() -> int:
     check(not perrors2, "повтор провайдеров без ошибок")
     pcfg2 = (fake / "opencode.jsonc").read_text(encoding="utf-8")
     check(pcfg2.count('"ollama"') == 1, "повтор не двоит пресет")
-    check(all(opencode_caps.providers_status(fake).values()), "статус видит пресеты")
+    _pstat = opencode_caps.providers_status(fake)
+    check(all(_pstat[name] for name in psel),
+          f"статус видит установленные пресеты: {sorted(psel)}")
+    check(all(not _pstat[name] for name in opencode_caps.PROVIDER_DYNAMIC),
+          "а пресеты из живого моста честно показаны как неустановленные")
+    # Без живого моста такой пресет не вписывается, и это не поломка:
+    # список моделей моста выдумывать нельзя. Проверяем отказ и то, что
+    # после него в настройках ничего не появилось.
+    _dyn = set(opencode_caps.PROVIDER_DYNAMIC)
+    if _dyn:
+        _, dyn_errors = opencode_caps.install_providers(fake, _dyn)
+        check(bool(dyn_errors) and any("живого моста" in e for e in dyn_errors),
+              f"пресет из живого моста без моста не вписан: {dyn_errors[:1]}")
+        _cfg_dyn = (fake / "opencode.jsonc").read_text(encoding="utf-8")
+        check(all(f'"{name}"' not in _cfg_dyn for name in _dyn),
+              "и в настройках его не появилось")
+        check(opencode_caps.check_jsonc(_cfg_dyn),
+              "отказ не поломал файл настроек")
     _, perrors3 = opencode_caps.remove_providers(fake, psel)
     check(not perrors3, f"пресеты убраны без ошибок: {perrors3 or 'чисто'}")
     pcfg3 = (fake / "opencode.jsonc").read_text(encoding="utf-8")
@@ -2983,14 +3004,30 @@ def main() -> int:
     # Вкладка в окне: три галочки расширений + три провайдера.
     # Мостов среди галочек нет — они едут с базой и подставляются всегда.
     ctab = window.caps_tab
-    check(len(ctab.checks) == 3, f"галочек три: {sorted(ctab.checks)}")
+    # Считаем не «три», а сколько их на самом деле: в списке вкладки пять
+    # возможностей — голос, агенты, обход блокировок и новые rtk с caveman.
+    # Число берётся из общего списка, чтобы следующая возможность не
+    # ломала проверку ещё раз.
+    _caps_want = len(opencode_caps.CAPS_CHOICES)
+    check(len(ctab.checks) == _caps_want,
+          f"галочек {_caps_want}: {sorted(ctab.checks)}")
     check("antiblock" in ctab.checks, "галочка обхода на месте")
     check("pc" not in ctab.checks and "ncp" not in ctab.checks,
           "галочек мостов в окне нет — они едут с базой")
     sel = ctab._selection()
     check({"pc", "ncp"} <= sel, f"мосты входят в выбор всегда: {sorted(sel)}")
-    check(len(ctab.pchecks) == 3, f"провайдеров три: {sorted(ctab.pchecks)}")
-    check(all(box.isChecked() for box in ctab.checks.values()), "по умолчанию всё отмечено")
+    _prov_want = len(opencode_caps.PROVIDER_PRESETS)
+    check(len(ctab.pchecks) == _prov_want,
+          f"провайдеров {_prov_want}: {sorted(ctab.pchecks)}")
+    # rtk и caveman по умолчанию сняты: у rtk нужен бинарник в PATH,
+    # caveman меняет стиль ответов. Всё остальное отмечено.
+    _off = set(opencode_caps.CAPS_OFF_BY_DEFAULT)
+    check(all(box.isChecked() for name, box in ctab.checks.items()
+              if name not in _off),
+          "по умолчанию отмечено всё, кроме экономии")
+    check(all(not box.isChecked() for name, box in ctab.checks.items()
+              if name in _off),
+          f"переключатели экономии сняты по умолчанию: {sorted(_off)}")
     check(not any(box.isChecked() for box in ctab.pchecks.values()),
           "провайдеры по умолчанию не отмечены (ключи — дело человека)")
     check(ctab.btn_install.isEnabled(), "кнопка «Поставить» доступна")
@@ -5808,6 +5845,426 @@ def main() -> int:
         else:
             _lm_os.environ["LMARENA_HOST"] = _lm_env_host
         shutil.rmtree(_lm_tmp, ignore_errors=True)
+
+    # ---- 8ч. rtk и caveman: инструменты экономии, не MCP. ----------------
+    # По §7 инструкции оба — не серверы: в mcp-registry.json их быть не
+    # должно. rtk кладётся в настройки плагином, caveman — правилами в
+    # AGENTS.md между нашими метками. Живого rtk в этой проверке нет: его
+    # бинарник человек ставит по README, из песочницы он не скачивается.
+    # Поэтому поведение проверяется на заглушке, которая подменяет сам
+    # вызов rtk и отвечает так, как отвечает настоящий по README. Это
+    # проверка нашего кода, а не доказательство экономии: экономию мерит
+    # человек на своей машине кнопкой «Замерить rtk».
+    import hashlib as _tk_hashlib  # noqa: PLC0415
+    import os as _tk_os  # noqa: PLC0415
+    import subprocess as _tk_sp  # noqa: PLC0415
+    import rtk as _tk_rtk  # noqa: PLC0415 — рядом лежит, круга нет
+    import caveman as _tk_cave  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8ч. rtk и caveman: экономия ответов и вывода ---")
+
+    def _tk_blob(path: Path) -> str:
+        """git-blob-sha1: им сверяются копии чужих файлов."""
+        _data = path.read_bytes()
+        return _tk_hashlib.sha1(b"blob %d\0" % len(_data) + _data).hexdigest()
+
+    _tk_root = core.program_root()
+    _tk_payloads = (
+        ("плагин rtk", _tk_root / "tools" / "thirdparty" / "rtk" / "hooks"
+         / "opencode" / "rtk.ts", _tk_rtk.SOURCE_BLOB,
+         ("tool.execute.before", "rtk hook opencode", "which rtk")),
+        ("правила caveman, лёгкий уровень", _tk_root / "tools" / "thirdparty"
+         / "caveman" / "levels" / "lite.md",
+         _tk_cave.SOURCE_BLOBS["levels/lite.md"],
+         ("Respond terse like smart caveman", "All technical substance stay")),
+        ("правила caveman, полный уровень", _tk_root / "tools" / "thirdparty"
+         / "caveman" / "levels" / "full.md",
+         _tk_cave.SOURCE_BLOBS["levels/full.md"],
+         ("ultracave", "Each fact once")),
+    )
+    for _tk_title, _tk_path, _tk_want_blob, _tk_marks in _tk_payloads:
+        check(_tk_path.is_file(), f"{_tk_title}: копия лежит в tools/thirdparty")
+        if not _tk_path.is_file():
+            continue
+        check(_tk_blob(_tk_path) == _tk_want_blob,
+              f"{_tk_title}: байты совпадают с исходником автора "
+              f"(blob {_tk_want_blob[:8]})")
+        _tk_text = _tk_path.read_text(encoding="utf-8")
+        _tk_missing = [m for m in _tk_marks if m not in _tk_text]
+        check(not _tk_missing,
+              f"{_tk_title}: ключевые строки на месте (нет: {_tk_missing})")
+
+    for _tk_name in ("rtk", "caveman"):
+        check((_tk_root / "tools" / "thirdparty" / _tk_name / "LICENSE").is_file(),
+              f"{_tk_name}: текст лицензии автора лежит рядом с кодом")
+    check((_tk_root / "tools" / "thirdparty" / "caveman" / "NOTICE").is_file(),
+          "caveman: уведомление автора (NOTICE) тоже рядом — так требует Apache-2.0")
+
+    # Плагин rtk не должен лежать в config/plugins: иначе он ставился бы
+    # всегда, без галочки, и переключатель был бы обманом.
+    _tk_cfg_plugins = sorted(
+        p.name for p in (_tk_root / "config" / "plugins").glob("*") if p.is_file()
+    )
+    check(_tk_cfg_plugins == ["memory-base.js"],
+          f"в config/plugins только плагин памяти, rtk ставится галочкой: {_tk_cfg_plugins}")
+
+    # Уведомления и честность цифр.
+    _tk_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _tk_name in ("rtk-ai/rtk", "JuliusBrussee/caveman"):
+        check(_tk_name in _tk_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник: {_tk_name}")
+    _tk_cav_readme = (_tk_root / "tools" / "thirdparty" / "caveman"
+                      / "README.md").read_text(encoding="utf-8")
+    check("opencode" in _tk_cav_readme and "plugin" in _tk_cav_readme,
+          "caveman: в README отмечено, что opencode автор поддерживает")
+    check("65–75%" in _tk_cav_readme and "независимой проверки нет" in _tk_cav_readme,
+          "caveman: 65–75% названы заявлением автора, а не фактом")
+    check("65–75%" in _tk_notice and "независимой проверки нет" in _tk_notice,
+          "caveman: та же оговорка стоит и в уведомлениях о лицензиях")
+    check("node bin/install.js --only opencode" in _tk_cav_readme,
+          "caveman: сказано, какой установщик автора программа не запускает")
+    _tk_rtk_readme = (_tk_root / "tools" / "thirdparty" / "rtk"
+                      / "README.md").read_text(encoding="utf-8")
+    for _tk_bit in ("winget install rtk-ai.rtk", "cargo install --git",
+                    "rtk --version", "rtk gain"):
+        check(_tk_bit in _tk_rtk_readme,
+              f"rtk: порядок установки и проверки взят из README автора: {_tk_bit}")
+    check("rtk init -g --opencode" in _tk_rtk_readme,
+          "rtk: названа команда автора, которую программа не выполняет (правит Claude)")
+
+    # Не MCP: в реестре серверов их нет.
+    _tk_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _tk_ids = {str(s.get("id")) for s in _tk_registry.get("servers", [])}
+    check(not ({"rtk", "caveman"} & _tk_ids),
+          "rtk и caveman не записаны серверами MCP — они не серверы")
+
+    # Галочки, уровень и кнопки на вкладке opencode.
+    _tk_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check({"rtk", "caveman"} <= _tk_choices,
+          "галочки rtk и caveman есть в списке вкладки opencode")
+    check({name for name, _title in opencode_caps.CAPS} >= {"rtk", "caveman"},
+          "и в общем списке возможностей — иначе их не примет установка")
+    check(set(opencode_caps.CAPS_OFF_BY_DEFAULT) == {"rtk", "caveman"},
+          "обе галочки по умолчанию сняты: включать их молча нельзя")
+    _tk_main = (_tk_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _tk_bit, _tk_why in (
+        ("Замерить rtk", "кнопка замера"),
+        ("Уровень caveman", "выбор уровня caveman"),
+        ("caveman_level", "передача уровня в установку"),
+        ('"full"', "полный уровень в списке"),
+    ):
+        check(_tk_bit in _tk_main, f"вкладка opencode: {_tk_why} ({_tk_bit})")
+    _tk_caps_src = (_tk_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    check("caveman_level" in _tk_caps_src and "_caveman_module" in _tk_caps_src,
+          "установка возможностей знает про уровень caveman")
+    check("_rtk_module" in _tk_caps_src,
+          "и про rtk — своим модулем, как обход блокировок")
+    _tk_core_src = (_tk_root / "tools" / "dbapp" / "core.py").read_text(encoding="utf-8")
+    check("caveman.rescue" in _tk_core_src,
+          "повторное «Подключить базу» возвращает правила caveman в AGENTS.md")
+    _tk_base_agents = (_tk_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("rtk" in _tk_base_agents and "caveman" in _tk_base_agents,
+          "инструменты упомянуты в config/AGENTS.md, как велит §7 инструкции")
+    check("не MCP" in _tk_base_agents,
+          "и там же сказано, что это не MCP-серверы")
+
+    # ---- поведение: настройки во временной папке, rtk — заглушкой.
+    _TK_FAKE = "/заглушка/rtk"
+    _tk_tmp = Path(tempfile.mkdtemp(prefix="tk-caps-"))
+    _tk_saved = (_tk_rtk.find_binary, _tk_rtk._run)
+
+    def _tk_fake_binary():
+        return _TK_FAKE
+
+    def _tk_fake_run(args, timeout):
+        """Ответы, которые даёт настоящий rtk по README: версия и hook."""
+        if "--version" in args:
+            return 0, "rtk 9.9.9-заглушка", ""
+        if len(args) > 2 and args[1] == "hook":
+            return 0, "{}", ""
+        if args and args[0] == _TK_FAKE:
+            return 0, "short output", ""
+        return 0, "d" * 400, ""
+
+    try:
+        # Случай «rtk не поставлен». Проверка идёт ДО записи: в настройки
+        # не должно попасть ничего, включая папку plugins и манифест.
+        _tk_dest = _tk_tmp / "settings"
+        _tk_dest.mkdir()
+        _tk_rtk.find_binary = lambda: None
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest)
+        check(bool(_tk_e),
+              "без rtk программа отказывает, а не делает вид, что включила")
+        check(any("ничего не вписано" in x for x in _tk_e),
+              f"отказ говорит, что в настройки ничего не вписано: {_tk_e[:1]}")
+        check(not (_tk_dest / "plugins" / "rtk.ts").exists(),
+              "плагин при отказе не появляется")
+        check(not (_tk_dest / "plugins").exists(),
+              "и папка plugins не создаётся ради отказа")
+        check(not (_tk_dest / ".opencode-base-caps.json").exists(),
+              "и манифест установки не заводится")
+        _tk_ok, _tk_note = _tk_rtk.live_check()
+        check(not _tk_ok and "не найден" in _tk_note,
+              f"живая проверка честно называет причину: {_tk_note[:60]}")
+        _tk_m, _tk_e = _tk_rtk.measure()
+        check(not _tk_m and any("не проверено" in x for x in _tk_e),
+              "замер без rtk не выдумывает числа, а говорит «это не проверено»")
+
+        # Рабочий rtk (заглушка): версия отвечает и «hook opencode» отвечает.
+        _tk_rtk.find_binary = _tk_fake_binary
+        _tk_rtk._run = _tk_fake_run
+        _tk_ok, _tk_note = _tk_rtk.live_check()
+        check(_tk_ok, f"живая проверка проходит на отвечающем rtk: {_tk_note}")
+
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest)
+        _tk_plugin = _tk_dest / "plugins" / "rtk.ts"
+        check(not _tk_e and _tk_plugin.is_file(),
+              f"плагин ставится в plugins/rtk.ts: {_tk_e}")
+        check(_tk_plugin.read_text(encoding="utf-8") == (
+            _tk_root / "tools" / "thirdparty" / "rtk" / "hooks" / "opencode"
+            / "rtk.ts").read_text(encoding="utf-8"),
+            "поставленный плагин по тексту — копия файла автора, без правок")
+        _tk_manifest = json.loads(
+            (_tk_dest / ".opencode-base-caps.json").read_text(encoding="utf-8"))
+        check(str(_tk_plugin) in _tk_manifest.get("files", {}),
+              "файл записан в наш манифест — чужое им не считается")
+        check(opencode_caps.caps_status(_tk_dest).get("rtk") is True,
+              "состояние на вкладке видит поставленный плагин")
+
+        _tk_text_before = _tk_plugin.read_text(encoding="utf-8")
+        _tk_m2, _tk_e2 = _tk_rtk.install(_tk_dest)
+        check(_tk_plugin.read_text(encoding="utf-8") == _tk_text_before,
+              "повторное «Включить» файл не меняет")
+        check(any("не менялся" in x for x in _tk_m2),
+              f"и говорит об этом словами: {_tk_m2[-1:]}")
+        _tk_m3, _tk_e3 = _tk_rtk.remove(_tk_dest)
+        check(not _tk_e3 and not _tk_plugin.exists(),
+              f"выключение убирает наш плагин: {_tk_e3}")
+        _tk_m4, _tk_e4 = _tk_rtk.remove(_tk_dest)
+        check(not _tk_e4 and any("не стоял" in x for x in _tk_m4),
+              "повторное выключение — не ошибка, а «убирать нечего»")
+
+        # Старая версия: команды «hook opencode» нет — плагин был бы мёртвым.
+        _tk_dest_old = _tk_tmp / "settings-old"
+        _tk_dest_old.mkdir()
+
+        def _tk_fake_old(args, timeout):
+            if "--version" in args:
+                return 0, "rtk 0.50.0-заглушка", ""
+            return 2, "", "usage: rtk ..."
+
+        _tk_rtk._run = _tk_fake_old
+        _tk_ok_old, _tk_note_old = _tk_rtk.live_check()
+        check(not _tk_ok_old and "v0.51" in _tk_note_old,
+              f"старая версия отвергается с объяснением: {_tk_note_old[:70]}")
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest_old)
+        check(not (_tk_dest_old / "plugins" / "rtk.ts").exists()
+              and any("ничего не вписано" in x for x in _tk_e),
+              "со старым rtk плагин не ставится, и настройки не тронуты")
+
+        # Замер: та же команда дважды, числами.
+        _tk_rtk._run = _tk_fake_run
+        _tk_mm, _tk_ee = _tk_rtk.measure(command=(sys.executable, "-c", "print(1)"),
+                                        cwd=_tk_tmp)
+        _tk_text_mm = " | ".join(_tk_mm)
+        check(not _tk_ee and any("Без rtk: 400 байт" in x for x in _tk_mm),
+              f"замер показывает байты без rtk: {_tk_text_mm[:80]}")
+        check(any("Через rtk: 12 байт" in x for x in _tk_mm),
+              f"и через rtk: {_tk_text_mm[:120]}")
+        check(any("Короче на 97%" in x for x in _tk_mm),
+              f"и называет, насколько короче: {_tk_mm[-1:]}")
+
+        # Команда не запустилась — замер молчит о числах и говорит причину.
+        def _tk_fake_fail(args, timeout):
+            return 1, "", "No such file or directory"
+
+        _tk_rtk._run = _tk_fake_fail
+        _tk_m, _tk_e = _tk_rtk.measure(command=("python-которого-нет",), cwd=_tk_tmp)
+        check(not _tk_m and bool(_tk_e),
+              "если команда не запускается, замер честно отказывает")
+        _tk_rtk._run = _tk_fake_run
+
+        # Чужие файлы: и при установке, и при уборке.
+        _tk_dest_f = _tk_tmp / "settings-foreign"
+        (_tk_dest_f / "plugins").mkdir(parents=True)
+        (_tk_dest_f / "plugins" / "rtk.ts").write_text(
+            "// чужой плагин, не наш\n", encoding="utf-8")
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest_f)
+        check(any("не наш" in x for x in _tk_e),
+              f"чужой rtk.ts не перезаписывается: {_tk_e[:1]}")
+        check((_tk_dest_f / "plugins" / "rtk.ts").read_text(encoding="utf-8")
+              == "// чужой плагин, не наш\n",
+              "чужой файл остался ровно таким, каким был")
+        _tk_m, _tk_e = _tk_rtk.remove(_tk_dest_f)
+        check(any("не наш" in x for x in _tk_e)
+              and (_tk_dest_f / "plugins" / "rtk.ts").is_file(),
+              "и убрать чужой файл программа отказывается")
+
+        # Командная строка — то же, что кнопки. Живого rtk здесь может и не
+        # быть, поэтому «check» принимается в обоих исходах: важно, что он
+        # отвечает словами и не врёт.
+        _tk_cli = _tk_root / "tools" / "dbapp" / "rtk.py"
+        _tk_env = dict(_tk_os.environ)
+        _tk_env["OPENCODE_CONFIG_DIR"] = str(_tk_dest)
+        _tk_run = _tk_sp.run(
+            [sys.executable, str(_tk_cli), "status"], capture_output=True,
+            text=True, encoding="utf-8", env=_tk_env, timeout=90)
+        check(_tk_run.returncode == 0 and "Плагин rtk" in _tk_run.stdout,
+              f"командная строка rtk говорит состояние: "
+              f"{_tk_run.stdout.strip()[:60]}")
+        _tk_run = _tk_sp.run(
+            [sys.executable, str(_tk_cli), "check"], capture_output=True,
+            text=True, encoding="utf-8", env=_tk_env, timeout=90)
+        check(_tk_run.returncode in (0, 1) and "Живая проверка" in _tk_run.stdout,
+              f"и отвечает на «check» словами, а не молчанием: "
+              f"{_tk_run.stdout.strip()[:70]}")
+
+        # ---- caveman: правила в AGENTS.md, два уровня.
+        _tk_cav_dest = _tk_tmp / "caveman"
+        _tk_cav_dest.mkdir()
+        _tk_agents = _tk_cav_dest / "AGENTS.md"
+        _tk_agents.write_text(
+            "# Чужие правила базы\n\nЭту строку программа трогать не должна.\n",
+            encoding="utf-8")
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "lite")
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(not _tk_e, f"правила caveman вписываются без ошибок: {_tk_e}")
+        check(_tk_text.count(_tk_cave.BEGIN_MARK) == 1
+              and _tk_text.count(_tk_cave.END_MARK) == 1,
+              "метки caveman стоят ровно парой")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "чужие строки в AGENTS.md остались нетронутыми")
+        check("All technical substance stay" in _tk_text,
+              "в блоке — правила автора, а не пересказ")
+        check("65–75%" in _tk_text and "не проверена" in _tk_text,
+              "и там же сказано, что 65–75% — заявление автора")
+        check("Apache-2.0" in _tk_text,
+              "и что правила — чужая работа под Apache-2.0")
+        check(_tk_cave.status(_tk_cav_dest).get("level") == "lite",
+              "состояние показывает лёгкий уровень")
+
+        _tk_before = _tk_agents.read_bytes()
+        _tk_m2, _tk_e2 = _tk_cave.install(_tk_cav_dest, "lite")
+        check(_tk_agents.read_bytes() == _tk_before,
+              "повторная установка того же уровня файл не переписывает")
+        check(any("файл не менялся" in x for x in _tk_m2),
+              f"и об этом сказано словами: {_tk_m2[-1:]}")
+
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "full")
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(_tk_text.count(_tk_cave.BEGIN_MARK) == 1
+              and _tk_text.count(_tk_cave.END_MARK) == 1,
+              "смена уровня не двоит блок: метки по-прежнему парой")
+        check(_tk_cave.status(_tk_cav_dest).get("level") == "full",
+              "состояние показывает полный уровень")
+        check("Each fact once" in _tk_text,
+              "в полном уровне — правила ultracave автора")
+        check("disable-model-invocation" not in _tk_text,
+              "служебная шапка файла навыка в AGENTS.md не попала")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "чужие строки целы и после смены уровня")
+
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "какой-то-свой")
+        check(any("неизвестен" in x for x in _tk_m)
+              and _tk_cave.status(_tk_cav_dest).get("level") == "lite",
+              "неизвестный уровень не выдумывается, а заменяется лёгким")
+
+        # Поломанные метки: файл не трогаем, говорим прямо.
+        _tk_broken = _tk_tmp / "broken"
+        _tk_broken.mkdir()
+        (_tk_broken / "AGENTS.md").write_text(
+            "# чужое\n\n" + _tk_cave.BEGIN_MARK + "\nсередина без конца\n",
+            encoding="utf-8")
+        _tk_m, _tk_e = _tk_cave.install(_tk_broken, "lite")
+        check(bool(_tk_e) and "не парой" in " ".join(_tk_e),
+              f"поломанные метки не правятся автоматом: {_tk_e[:1]}")
+        check("середина без конца" in (_tk_broken / "AGENTS.md").read_text(
+            encoding="utf-8"),
+            "и файл с поломанными метками остался как был")
+        _tk_m, _tk_e = _tk_cave.remove(_tk_broken)
+        check(bool(_tk_e) and "не парой" in " ".join(_tk_e),
+              "уборка при поломанных метках тоже отказывает")
+
+        _tk_m, _tk_e = _tk_cave.remove(_tk_cav_dest)
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(not _tk_e and _tk_cave.BEGIN_MARK not in _tk_text,
+              f"выключение убирает наш блок: {_tk_e}")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "и чужие строки после уборки целы")
+        check(_tk_cave.status(_tk_cav_dest).get("installed") is False,
+              "состояние видит, что правил нет")
+
+        # Правила возвращаются, если «Подключить базу» перезаписало AGENTS.md.
+        _tk_cave.install(_tk_cav_dest, "full")
+        _tk_saved_text = _tk_agents.read_text(encoding="utf-8")
+        _tk_agents.write_text("# шаблон базы заново\n", encoding="utf-8")
+        check(_tk_cave.rescue(_tk_cav_dest, _tk_saved_text) is True
+              and _tk_cave.status(_tk_cav_dest).get("level") == "full",
+              "повторное подключение базы возвращает правила caveman")
+        check("шаблон базы заново" in _tk_agents.read_text(encoding="utf-8"),
+              "и заново скопированный файл не портится")
+        check(_tk_cave.rescue(_tk_cav_dest, "# без меток\n") is False,
+              "без наших меток возвращать нечего — rescue молчит")
+
+        # Через установку возможностей: то же, что кнопка «Поставить отмеченное».
+        _tk_dest_caps = _tk_tmp / "caps"
+        _tk_dest_caps.mkdir()
+        _tk_m, _tk_e = opencode_caps.install_caps(
+            _tk_root, _tk_dest_caps, {"rtk", "caveman"}, caveman_level="full")
+        _tk_status = opencode_caps.caps_status(_tk_dest_caps)
+        check(not _tk_e, f"галочки ставятся без ошибок: {_tk_e}")
+        check(_tk_status.get("rtk") is True and _tk_status.get("caveman") is True,
+              f"и состояние вкладки видит оба: {_tk_status}")
+        check((_tk_dest_caps / "plugins" / "rtk.ts").is_file(),
+              "плагин rtk лёг куда надо")
+        _tk_caps_agents = (_tk_dest_caps / "AGENTS.md").read_text(encoding="utf-8")
+        check("уровень: полный (ultracave)" in _tk_caps_agents,
+              "и уровень caveman — тот, что выбран в списке")
+        _tk_m, _tk_e = opencode_caps.remove_caps(_tk_dest_caps, {"rtk", "caveman"})
+        _tk_status = opencode_caps.caps_status(_tk_dest_caps)
+        check(not _tk_e and not _tk_status.get("rtk")
+              and not _tk_status.get("caveman"),
+              f"кнопка «Убрать отмеченное» снимает оба: {_tk_e}")
+
+        # Вкладка opencode: обе галочки на месте, сняты по умолчанию,
+        # у caveman — выбор из двух уровней, у rtk — кнопка замера.
+        _tk_tab = window.caps_tab
+        check({"rtk", "caveman"} <= set(_tk_tab.checks),
+              f"на вкладке opencode обе галочки стоят: {sorted(_tk_tab.checks)}")
+        check(not _tk_tab.checks["rtk"].isChecked()
+              and not _tk_tab.checks["caveman"].isChecked(),
+              "и обе сняты по умолчанию — молча такое не включается")
+        _tk_combo = [_tk_tab.caveman_level.itemData(i)
+                     for i in range(_tk_tab.caveman_level.count())]
+        check(_tk_combo == ["lite", "full"],
+              f"у caveman выбор из двух уровней: {_tk_combo}")
+        check(_tk_tab.btn_rtk_measure.isEnabled(),
+              "кнопка замера rtk доступна — числа человек получает на своей машине")
+
+        # Секретов и настоящих путей в новых файлах быть не должно.
+        _tk_our_files = (
+            _tk_root / "tools" / "dbapp" / "rtk.py",
+            _tk_root / "tools" / "dbapp" / "caveman.py",
+            _tk_root / "tools" / "thirdparty" / "rtk" / "README.md",
+            _tk_root / "tools" / "thirdparty" / "caveman" / "README.md",
+            _tk_cave.block_text("lite"),
+            _tk_cave.block_text("full"),
+        )
+        _tk_leaks: list[str] = []
+        for _tk_item in _tk_our_files:
+            _tk_where = str(_tk_item)
+            _tk_body = (_tk_item if isinstance(_tk_item, str)
+                        else _tk_item.read_text(encoding="utf-8"))
+            for _tk_mark in ("C:\\Users\\", "/home/", "/Users/", "sk-"):
+                if _tk_mark in _tk_body:
+                    _tk_leaks.append(f"{_tk_where}: {_tk_mark}")
+        check(not _tk_leaks,
+              f"в новых файлах нет секретов и настоящих путей: {_tk_leaks}")
+    finally:
+        _tk_rtk.find_binary, _tk_rtk._run = _tk_saved
+        shutil.rmtree(_tk_tmp, ignore_errors=True)
 
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()

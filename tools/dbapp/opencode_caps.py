@@ -38,15 +38,27 @@ CAPS = (
     ("ncp", "Мост NCP (авто)"),
     ("agents", "12 агентов"),
     ("antiblock", "Обход блокировок"),
+    ("rtk", "rtk — вывод команд короче"),
+    ("caveman", "caveman — ответы короче"),
 )
 
 #: Что вкладка «opencode» спрашивает у человека: только расширения.
 #: Мостов здесь нет — они едут с базой и включаются всегда.
+#: rtk и caveman — не MCP-серверы и не мосты: rtk кладёт в настройки
+#: плагин, caveman — правила в AGENTS.md. Оба живут в tools/thirdparty
+#: и в реестр mcp-registry.json не попадают.
 CAPS_CHOICES = (
     ("voice", "Команда /голос"),
     ("agents", "12 агентов"),
     ("antiblock", "Обход блокировок"),
+    ("rtk", "rtk — вывод команд короче"),
+    ("caveman", "caveman — ответы короче"),
 )
+
+#: Галочки, которые при открытии вкладки стоят снятыми: у rtk нужен
+#: бинарник в PATH, а caveman меняет стиль ответов — включать их молча,
+#: «по умолчанию», нельзя.
+CAPS_OFF_BY_DEFAULT = ("rtk", "caveman")
 
 #: Что подставляется всегда, без галочки: мосты — часть базы, а не опция.
 CAPS_ALWAYS = ("pc", "ncp")
@@ -880,11 +892,15 @@ def install_caps(
     selection: set[str],
     progress=None,
     antiblock_opts: dict[str, bool] | None = None,
+    caveman_level: str = "lite",
 ) -> tuple[list[str], list[str]]:
     """Ставит выбранное в папку настроек opencode. Возвращает (сообщения, ошибки).
 
     antiblock_opts — галочки раздела «Обход блокировок» (фасад, списки,
     команда, ярлык). Без них обход ставится целиком.
+
+    caveman_level — «лёгкий» (lite) или «полный» (full) уровень правил
+    caveman. Уровня у остальных возможностей нет, поэтому он один на вызов.
     """
     messages: list[str] = []
     errors: list[str] = []
@@ -953,7 +969,7 @@ def install_caps(
                 VOICE_MARK, str(core.program_root() / "tools" / "voice").replace("\\", "/")
             )
             target = dest / "command" / "voice.md"
-            if _place_file(target, body, manifest, say, errors, "Команда /голос"):
+            if place_file(target, body, manifest, say, errors, "Команда /голос"):
                 say("Команда /голос поставлена (папка command)")
 
     # --- агенты
@@ -963,7 +979,7 @@ def install_caps(
         put, skipped = 0, 0
         for src in sorted((core.program_root() / "tools" / "agents").glob("*.md")):
             target = agents_dir / src.name
-            if _place_file(target, src.read_text(encoding="utf-8"), manifest, say, errors,
+            if place_file(target, src.read_text(encoding="utf-8"), manifest, say, errors,
                            f"Агент {src.stem}", quiet=True):
                 put += 1
             else:
@@ -989,18 +1005,49 @@ def install_caps(
         except (OSError, ValueError) as exc:
             errors.append(f"Обход блокировок не поставился: {exc}")
 
+    # --- rtk: свой модуль. Он сам делает живую проверку и при отказе
+    # ничего не пишет — поэтому вызывается до общего «перезапустите».
+    if "rtk" in selection:
+        m_rtk, e_rtk = _rtk_module().install(dest, progress=progress)
+        messages += m_rtk
+        errors += e_rtk
+
+    # --- caveman: правила в AGENTS.md между нашими метками, уровень — выбор
+    # человека. Живой проверки тут не нужно: проверять нечего, кроме самого
+    # файла настроек, а он перед правкой копируется в _previous-version.
+    if "caveman" in selection:
+        m_cav, e_cav = _caveman_module().install(dest, caveman_level, progress=progress)
+        messages += m_cav
+        errors += e_cav
+
     if (
         "pc" in selection
         or "ncp" in selection
         or "voice" in selection
         or "agents" in selection
         or "antiblock" in selection
+        or "rtk" in selection
+        or "caveman" in selection
     ):
         say("Перезапустите opencode: настройки читаются при старте.")
     return messages, errors
 
 
-def _place_file(
+def _rtk_module():
+    """Модуль rtk рядом: отдельной функцией, чтобы не плодить импорты."""
+    import rtk  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return rtk
+
+
+def _caveman_module():
+    """Модуль caveman рядом."""
+    import caveman  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return caveman
+
+
+def place_file(
     target: Path,
     body: str,
     manifest: dict,
@@ -1093,6 +1140,18 @@ def remove_caps(
 
     write_manifest(dest, manifest)
 
+    # --- rtk: плагин убирает свой модуль и только свой файл.
+    if "rtk" in selection:
+        m_rtk, e_rtk = _rtk_module().remove(dest)
+        messages += m_rtk
+        errors += e_rtk
+
+    # --- caveman: из AGENTS.md убирается только наш блок между метками.
+    if "caveman" in selection:
+        m_cav, e_cav = _caveman_module().remove(dest)
+        messages += m_cav
+        errors += e_cav
+
     # --- обход блокировок: убирает свой модуль сам, в запас, не в корзину.
     if "antiblock" in selection:
         try:
@@ -1140,6 +1199,14 @@ def caps_status(dest: Path) -> dict[str, bool]:
 
         if antiblock.antiblock_status(dest):
             status["antiblock"] = True
+    except Exception:
+        pass
+    try:
+        status["rtk"] = bool(_rtk_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["caveman"] = bool(_caveman_module().status(dest).get("installed"))
     except Exception:
         pass
     _ = manifest
