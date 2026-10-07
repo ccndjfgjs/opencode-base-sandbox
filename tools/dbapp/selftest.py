@@ -1,4 +1,4 @@
-﻿"""Проверка окна без участия человека.
+"""Проверка окна без участия человека.
 
 Создаёт окно по-настоящему, но не показывает его на экране: прогоняет
 проверку имени, создание базы и подключение во временной папке и печатает
@@ -685,6 +685,12 @@ def main() -> int:
                   f"в таблице строк: {_reg_tab.rowCount()}")
             for _name in ("btn_reg_check", "btn_reg_on", "btn_reg_off", "btn_reg_src"):
                 check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            # Кнопки DBHub стоят в том же ряду: подключения к базам есть
+            # только у него, и без них настройка сервера была бы неполной.
+            for _name in ("btn_db_add", "btn_db_check"):
+                check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            check("dbhub" in window.caps_tab.AUTO_SERVERS,
+                  "DBHub умеет «Настроить автоматически»")
             _states = [
                 _reg_tab.item(r, 1).text() if _reg_tab.item(r, 1) else ""
                 for r in range(_reg_tab.rowCount())
@@ -4184,6 +4190,212 @@ def main() -> int:
         _ok, _note = bridges.probe_emulator()
         check(not _ok, f"без устройства проба честно отвечает «нет»: {_note}")
 
+    # ---- Мост DBHub: базы данных через npx
+    #
+    # Пакета моста в репозитории нет: его скачивает npx. Проверяем то,
+    # чем он управляется: лаунчер, запись в реестре, файл подключений и
+    # живую проверку против поддельного сервера протокола MCP.
+    import dbhub as _dbhub  # noqa: PLC0415 — рядом лежит, круга нет
+    _db_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "dbhub_bridge_launcher.py")
+    check(_db_launcher.is_file(), "лаунчер моста DBHub на месте")
+    if _db_launcher.is_file():
+        _db_src = _db_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _db_src,
+              "лаунчер DBHub пишет журнал в stderr, а не в stdout")
+        check("MCP_DBHUB_PASSWORD_" in _db_src,
+              "лаунчер DBHub передаёт пароль базы переменной окружения")
+        check("def main() -> int" in _db_src and "__main__" in _db_src,
+              "лаунчер DBHub запускается сам: main() и __main__")
+        check("PyQt6" not in _db_src and "from PyQt" not in _db_src,
+              "лаунчер DBHub не тянет окно программы: запускается отдельно")
+        check("--transport" in _db_src and "stdio" in _db_src,
+              "лаунчер DBHub запускает сервер по stdio")
+        # Имя переменной окружения задано в двух местах: окно пишет ссылку
+        # в файл подключений, лаунчер её разрешает. Разойдутся — и пароль
+        # молча не найдётся, а база не откроется.
+        import importlib.util as _ilu  # noqa: PLC0415 — только здесь
+        _db_spec = _ilu.spec_from_file_location("dbhub_check", _db_launcher)
+        _db_mod = (_ilu.module_from_spec(_db_spec)
+                   if _db_spec and _db_spec.loader else None)
+        if _db_mod is not None and _db_spec and _db_spec.loader:
+            _db_spec.loader.exec_module(_db_mod)
+            check(_db_mod.password_env("my-db") == _dbhub.password_env("my-db")
+                  == "MCP_DBHUB_PASSWORD_MY_DB",
+                  "имя переменной окружения совпадает у окна и лаунчера")
+        else:
+            check(False, "лаунчер DBHub читается как модуль для сверки имён")
+
+    _db_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "dbhub"), None)
+    check(_db_srv is not None, "сервер dbhub есть в реестре программы")
+    if _db_srv is not None:
+        _db_conn = _db_srv.raw.get("connection") or {}
+        _db_cmd = [str(part) for part in _db_conn.get("command") or []]
+        check(_db_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _db_cmd
+              and any("dbhub_bridge_launcher.py" in part for part in _db_cmd),
+              "команда dbhub — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _db_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде dbhub нет настоящих путей: {_db_cmd}")
+        check(_db_conn.get("warm_up") is True,
+              "у dbhub прогрев кэша включён: npx действительно скачивает пакет")
+        _db_raw = json.dumps(_db_srv.raw, ensure_ascii=False)
+        check(not re.search(r"[a-z]+://[^/\s:@]+:[^/@\s]+@", _db_raw),
+              "в записи реестра нет строк подключения с паролем")
+        check(not re.search(r"mcp-dbhub-[A-Za-z0-9_-]+-password\.txt", _db_raw),
+              "в реестре не назван файл пароля конкретной машины")
+        _db_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("dbhub" in (_db_node.get("required_by") or []),
+              "dbhub записан в «нужно мостам» у Node.js")
+
+        # «Только чтение» по умолчанию, лимит строк и пароль отдельным
+        # файлом. Всё это — на временной папке, ничего чужого не трогаем.
+        _db_tmp = Path(tempfile.mkdtemp(prefix="dbhub-selftest-"))
+        try:
+            _db_m1, _db_e1 = _dbhub.add_source(
+                _db_tmp, "sklad", "postgres",
+                "postgres://user:секрет-42@host:5432/db")
+            _db_toml = _db_tmp / "mcp-dbhub.toml"
+            check(not _db_e1 and _db_toml.is_file(),
+                  f"подключение записывается в mcp-dbhub.toml: {_db_e1}")
+            _db_text = (_db_toml.read_text(encoding="utf-8")
+                        if _db_toml.is_file() else "")
+            check("[[sources]]" in _db_text and 'id = "sklad"' in _db_text,
+                  "в файле подключений есть секция [[sources]] с источником")
+            check("секрет-42" not in _db_text,
+                  "пароль в файл подключений не попадает")
+            check("${MCP_DBHUB_PASSWORD_SKLAD}" in _db_text,
+                  "на месте пароля — ссылка на переменную окружения")
+            _db_pw = _db_tmp / "mcp-dbhub-sklad-password.txt"
+            check(_db_pw.is_file()
+                  and "секрет-42" in _db_pw.read_text(encoding="utf-8"),
+                  "пароль лежит отдельным файлом рядом с настройками")
+            _db_srcs = _dbhub.read_sources(_db_tmp)
+            check(len(_db_srcs) == 1 and _db_srcs[0].readonly
+                  and _db_srcs[0].max_rows == _dbhub.DEFAULT_MAX_ROWS,
+                  "«только чтение» включено по умолчанию, лимит строк задан")
+            check("[[tools]]" in _db_text and "readonly = true" in _db_text,
+                  "оба инструмента описаны явно, у запроса — «только чтение»")
+
+            # Отказ ничего не дописывает: тип базы и строка подключения
+            # разошлись — это ошибка человека, а не повод править файл.
+            _db_before = _db_text
+            _db_m2, _db_e2 = _dbhub.add_source(
+                _db_tmp, "other", "postgres", "mysql://root:pass@host/db")
+            check(bool(_db_e2), f"чужая схема отклонена: {_db_e2}")
+            check(_db_toml.read_text(encoding="utf-8") == _db_before,
+                  "после отказа файл подключений не тронут")
+            check(not (_db_tmp / "mcp-dbhub-other-password.txt").exists(),
+                  "и файла пароля для отклонённого подключения не появилось")
+
+            # Поддельный сервер протокола: в репозитории его нет, это тест.
+            _db_fake_lines = [
+                "import json, sys",
+                "TOOLS = [",
+                "    {'name': 'execute_sql', 'inputSchema': {'type': 'object'}},",
+                "    {'name': 'search_objects', 'inputSchema': {'type': 'object'}},",
+                "]",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'DBHub MCP Server',",
+                "                                 'version': '9.9.9'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': TOOLS}",
+                "    elif method == 'tools/call':",
+                "        tables = [{'name': 'books'}, {'name': 'authors'}]",
+                "        answer = {'content': [{'type': 'text',",
+                "                              'text': json.dumps({'tables': tables})}]}",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _db_fake_text = "\n".join(_db_fake_lines) + "\n"
+            _db_fake = _db_tmp / "подделка_dbhub.py"
+            _db_fake.write_text(_db_fake_text, encoding="utf-8")
+            _db_ok, _db_note = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_fake)])
+            check(_db_ok, f"живая проверка разговаривает с сервером: {_db_note}")
+            check("инструментов 2" in _db_note,
+                  f"и видит оба инструмента: {_db_note}")
+            check("таблиц видно 2" in _db_note,
+                  f"и получает список таблиц: {_db_note}")
+            # Тот же протокол, другое имя сервера: чужой мост за DBHub
+            # выдавать нельзя, и проверка обязана это заметить.
+            _db_other = _db_tmp / "подделка_чужая.py"
+            _db_other.write_text(
+                _db_fake_text.replace("DBHub MCP Server", "Совсем Другой Сервер"),
+                encoding="utf-8")
+            _db_ok2, _db_note2 = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_other)])
+            check(not _db_ok2 and "DBHub" in _db_note2,
+                  f"чужой сервер не выдаётся за DBHub: {_db_note2}")
+            # Отказ сервера: в сообщении не должно остаться пароля.
+            _db_bad = _db_tmp / "подделка_отказ.py"
+            _db_bad.write_text(
+                "import sys" + chr(10)
+                + "print('ошибка: postgres://user:секрет-42@host/db', "
+                  "file=sys.stderr)" + chr(10)
+                + "sys.exit(1)" + chr(10),
+                encoding="utf-8")
+            _db_ok3, _db_note3 = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_bad)])
+            check(not _db_ok3, f"молчащий мост — это отказ: {_db_note3}")
+            check("секрет-42" not in _db_note3,
+                  f"в сообщении об отказе пароля нет: {_db_note3}")
+
+            # Живая проверка не прошла — в настройки не пишется ничего.
+            _db_empty = _db_tmp / "пустая-папка"
+            _db_empty.mkdir()
+            _db_m4, _db_e4 = _dbhub.auto_setup(_db_empty, _db_srv)
+            check(bool(_db_e4),
+                  f"без подключения автонастройка отказывает: {_db_e4[:1]}")
+            check(not (_db_empty / "opencode.jsonc").exists(),
+                  "и в настройки opencode ничего не вписано")
+
+            # Повторное «Включить» не переписывает файл настроек: opencode
+            # поднимает новый экземпляр моста на каждую правку конфига.
+            _db_dest = _db_tmp / "настройки"
+            _db_dest.mkdir()
+            (_db_dest / "opencode.jsonc").write_text(
+                '{\n  "mcp": {}\n}\n', encoding="utf-8")
+            _db_clone = copy.copy(_db_srv)
+            _db_clone.raw = dict(_db_srv.raw)
+            # Прогрев кэша в проверке выключен намеренно: он запускает
+            # лаунчер, а тот — npx, и на чистой машине селфтест скачивал
+            # бы 245 МБ пакета. Что прогрев в реестре включён, проверено
+            # отдельной проверкой выше.
+            _db_clone.raw["connection"] = dict(_db_srv.raw.get("connection") or {},
+                                               warm_up=False)
+            _db_clone.requirements = []
+            _db_clone.has_connection = True
+            _db_a1, _db_ae1 = _mcp_registry.enable(_db_dest, _db_clone)
+            _db_c1 = (_db_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            _db_a2, _db_ae2 = _mcp_registry.enable(_db_dest, _db_clone)
+            _db_c2 = (_db_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            check(not _db_ae1 and '"dbhub"' in _db_c1,
+                  f"включение dbhub пишет блок в настройки: {_db_ae1}")
+            check("dbhub_bridge_launcher.py" in _db_c1
+                  and "{PROGRAM}" not in _db_c1,
+                  "в настройки вписан настоящий путь к лаунчеру")
+            check(_db_c1 == _db_c2 and _db_c2.count('"dbhub"') == 1,
+                  "повторное включение dbhub не меняет файл настройки")
+            check(any("не трогаю" in m for m in _db_a2),
+                  "и программа говорит, что файл не тронула")
+        finally:
+            shutil.rmtree(_db_tmp, ignore_errors=True)
+
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
     check(isinstance(_on, bool) and _port > 0,
@@ -5284,9 +5496,9 @@ def main() -> int:
     # --- настоящий реестр
     _base = core.program_root()
     _servers = mcp_registry.load_servers(_base)
-    check(len(_servers) == 8, f"реестр читается, 8 серверов: {len(_servers)}")
+    check(len(_servers) == 9, f"реестр читается, 9 серверов: {len(_servers)}")
     check(all(s.program_install is not None for s in _servers),
-          "у всех 8 серверов есть блок program_install")
+          "у всех 9 серверов есть блок program_install")
     _by_id = {s.id: s.program_install for s in _servers}
     if all(_by_id.values()):
         check(_by_id["blender"].winget_id == "BlenderFoundation.Blender"
@@ -5369,13 +5581,37 @@ def main() -> int:
         check(any("серверов 0" in b for b in _bad2),
               f"и называет причину — ноль серверов: {(_bad2 or [''])[0][:70]}")
 
-        # Все восемь на месте, и у каждого четыре ответа.
+        # Все девять на месте, и у каждого четыре ответа.
         _views = pmod.server_views(_base)
-        check(len(_views) == 8, f"движок прочитал все восемь серверов: {len(_views)}")
+        check(len(_views) == 9, f"движок прочитал все девять серверов: {len(_views)}")
         _by = {v.id: v for v in _views}
         for _sid in ("windows-admin", "excel", "blender", "adobe-creativity",
-                     "android-studio", "obs", "android-emulator", "ldplayer"):
+                     "android-studio", "obs", "android-emulator", "ldplayer",
+                     "dbhub"):
             check(_sid in _by, f"сервер {_sid} есть в движке")
+
+        # Порог версии сравнивается, а не просто запоминается. Пример DBHub
+        # в задании обещал Node.js 18+, а в самом пакете dbhub записано
+        # engines.node ≥ 22.5.0. Если бы сверка сводилась к непустому полю,
+        # человек с Node 20 увидел бы «готово» и получил отказ при запуске.
+        # Проверяем не текст, а поведение движка: команда печатает версию,
+        # движок её читает и сравнивает с порогом.
+        _req_old = _mcp_registry.Requirement(
+            what="пример", kind="command", value=sys.executable,
+            args=["-c", "print('20.11.0')"], min_version=22)
+        _mcp_registry.check_requirement(_req_old)
+        check(_req_old.ok is False and "22" in _req_old.detail,
+              f"Node.js 20 при пороге 22 — не подходит: {_req_old.detail}")
+        _req_new = _mcp_registry.Requirement(
+            what="пример", kind="command", value=sys.executable,
+            args=["-c", "print('22.5.0')"], min_version=22)
+        _mcp_registry.check_requirement(_req_new)
+        check(_req_new.ok is True,
+              f"Node.js 22 при пороге 22 — подходит: {_req_new.detail}")
+        _dbhub_requires = next(s for s in _servers if s.id == "dbhub").requires
+        _node_in_dbhub = next((r for r in _dbhub_requires if r.value == "node"), None)
+        check(_node_in_dbhub is not None and _node_in_dbhub.min_version == 22,
+              "у dbhub порог Node.js 22 — из engines пакета, а не обещание 18+")
 
         # Кнопка там, где ставить реально можно.
         check(_by["windows-admin"].install.has_button
@@ -5422,8 +5658,8 @@ def main() -> int:
         _needs = pmod.bridge_needs(_base)
         check(len(_needs) == 2, f"в разделе «нужно мостам» два предмета: {len(_needs)}")
         _nn = {n.program: n for n in _needs}
-        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 3,
-              "Node.js требуют трое серверов из восьми")
+        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 4,
+              "Node.js требуют четверо серверов из девяти")
         check(_nn.get("Node.js") is not None
               and _nn["Node.js"].install.winget_id == "OpenJS.NodeJS.LTS",
               "у Node.js настоящий идентификатор winget")
@@ -5668,7 +5904,7 @@ def main() -> int:
     if pcard is not None and wmod is not None:
         _pbase = core.program_root()
         _cards = pcard.cards(_pbase)
-        check(len(_cards) >= 8, f"карточек не меньше восьми: {len(_cards)}")
+        check(len(_cards) >= 9, f"карточек не меньше девяти: {len(_cards)}")
         check(pcard.section_problem(_pbase) == "",
               f"данные для карточек целы: {pcard.section_problem(_pbase)[:60]}")
 
@@ -5677,8 +5913,8 @@ def main() -> int:
         _node = _by_name.get("Node.js")
         check(_node is not None, "Node.js — карточка есть")
         _node_servers = set(_node.servers) if _node else set()
-        check(_node_servers == {"windows-admin", "excel", "obs"},
-              f"Node.js одной карточкой на троих серверов: {sorted(_node_servers)}")
+        check(_node_servers == {"windows-admin", "excel", "obs", "dbhub"},
+              f"Node.js одной карточкой на четверых серверов: {sorted(_node_servers)}")
         check(sum(1 for c in _cards if c.name == "Node.js") == 1,
               "и не двумя карточками, как он описан в реестре")
         check("нужна:" in pcard.needed_by_text(_node, pcard.servers_by_name(_pbase)),
@@ -6868,7 +7104,7 @@ def main() -> int:
     # ---- 8х. Совместимость версий: предупреждение, а не отказ
     echo("\n--- 8х. Совместимость версий ---")
     #
-    # Откуда. Описание совместимости лежало в реестре у всех восьми
+    # Откуда. Описание совместимости лежало в реестре у всех девяти
     # серверов, а читала его ноль строк кода. Версия на машине и список
     # проверенных были записаны и не показывались никому.
     #

@@ -91,3 +91,15 @@ tools/antiblock/xray.exe
 tools/antiblock/public_socks5.local.txt
 tools/antiblock/nodes.local.json
 tools/antiblock/*.bak-*.txt
+
+# Секреты моста DBHub. Публиковать нельзя: это данные этой машины.
+#   mcp-dbhub-<имя>-password.txt — пароль базы из строки подключения.
+#     Лежит рядом с настройками opencode, и в конфиг его не пишут —
+#     но папка настроек может оказаться внутри базы, поэтому правило
+#     закрывает и её: по образцу config/.secrets/ выше.
+#   mcp-dbhub.toml — подключения: имена хостов, баз и пути к файлам
+#     SQLite. Секрета в нём нет (пароль заменён на ${...}), но это
+#     состояние этой машины, а не часть базы.
+mcp-dbhub-*-password.txt
+mcp-*-password.txt
+mcp-dbhub.toml

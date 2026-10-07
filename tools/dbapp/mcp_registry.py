@@ -932,7 +932,11 @@ def warm_up(server: Server, progress=None) -> str:
     conn = server.raw.get("connection")
     if not isinstance(conn, dict) or not conn.get("warm_up"):
         return ""
-    command = [str(part) for part in (conn.get("command") or [])]
+    # Плейсхолдеры разрешаются так же, как при записи в настройки. Без
+    # этого прогрев у моста, который запускается лаунчером, пытался бы
+    # запустить «{DBAPP_PYTHON}» — то есть ничего, — и сервер выглядел бы
+    # неработающим на ровном месте.
+    command = resolve_command([str(part) for part in (conn.get("command") or [])])
     if not command:
         return ""
 

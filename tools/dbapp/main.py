@@ -20,11 +20,12 @@ if __package__ in (None, ""):
     import opencode_caps  # type: ignore[import-not-found]
     import android_studio  # type: ignore[import-not-found]
     import bridges  # type: ignore[import-not-found]
+    import dbhub  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   program_cards, winget_install)
+                   dbhub, program_cards, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2270,6 +2271,139 @@ class ObsPasswordDialog(QDialog):
         return self._path
 
 
+class DbhubConnectionDialog(QDialog):
+    """Окно подключения к базе для DBHub.
+
+    Спрашиваем только то, без чего мост нечего запускать: как звать
+    подключение, к какой базе и по какой строке. Отдельного поля под
+    пароль нет намеренно: пароль берётся из строки подключения и уезжает
+    в свой файл, а в конфиг попадает ссылка на переменную. Так секрет не
+    остаётся в файле, который открыт и переносится между компьютерами.
+
+    Файл подключений ведёт программа: он лежит рядом с настройками
+    opencode и в репозиторий не попадает. Дописать второй источник можно
+    тем же окном — список уже добавленных виден наверху.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Подключение к базе для DBHub")
+        self.setMinimumWidth(640)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "DBHub умеет PostgreSQL, MySQL, MariaDB, SQL Server, Oracle и "
+            "SQLite. Строку подключения возьми у себя: у каждой базы она "
+            "своя. Пароль, если он есть в строке, программа вынет и "
+            "положит отдельным файлом рядом с настройками — в конфиге "
+            "останется только ссылка на него.",
+            wrap=True,
+        ))
+
+        old = dbhub.read_sources(self.dest)
+        if old:
+            names = ", ".join(f"{s.id} ({s.db_type})" for s in old)
+            box.addWidget(ui.label(f"Уже добавлено: {names}", kind="dim", wrap=True))
+
+        form = QVBoxLayout()
+        form.setSpacing(4)
+
+        row_name = QHBoxLayout()
+        row_name.addWidget(ui.label("Имя подключения:", kind="title"))
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("латиницей, без пробелов: sklad, main-db")
+        row_name.addWidget(self.name, 1)
+        form.addLayout(row_name)
+
+        row_type = QHBoxLayout()
+        row_type.addWidget(ui.label("Тип базы:", kind="title"))
+        self.db_type = QComboBox()
+        for key, title, _schemes in dbhub.DB_TYPES:
+            self.db_type.addItem(title, key)
+        self.db_type.currentIndexChanged.connect(self._refresh_example)
+        row_type.addWidget(self.db_type, 1)
+        form.addLayout(row_type)
+
+        row_dsn = QHBoxLayout()
+        row_dsn.addWidget(ui.label("Строка подключения:", kind="title"))
+        self.dsn = QLineEdit()
+        row_dsn.addWidget(self.dsn, 1)
+        form.addLayout(row_dsn)
+        box.addLayout(form)
+
+        row_limits = QHBoxLayout()
+        self.readonly = QCheckBox("Только чтение")
+        self.readonly.setChecked(True)
+        self.readonly.setToolTip(
+            "Запросы на изменение данных будут отклонены. Снять галочку — "
+            "значит разрешить серверу менять базу"
+        )
+        row_limits.addWidget(self.readonly)
+        row_limits.addSpacing(16)
+        row_limits.addWidget(ui.label("Строк в ответе:", kind="title"))
+        self.max_rows = QSpinBox()
+        self.max_rows.setRange(10, 100000)
+        self.max_rows.setValue(dbhub.DEFAULT_MAX_ROWS)
+        self.max_rows.setSingleStep(100)
+        self.max_rows.setToolTip(
+            "Сколько строк сервер отдаст в одном ответе. Ограничение "
+            "касается execute_sql: без него один неосторожный запрос "
+            "вернёт таблицу целиком"
+        )
+        row_limits.addWidget(self.max_rows)
+        row_limits.addStretch(1)
+        box.addLayout(row_limits)
+
+        self.example = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.example)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Записать")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        self._refresh_example()
+
+    def _current_type(self) -> str:
+        return str(self.db_type.currentData() or "")
+
+    def _refresh_example(self) -> None:
+        key = self._current_type()
+        example = dbhub.DSN_EXAMPLES.get(key, "")
+        self.dsn.setPlaceholderText(example)
+        self.example.setText(
+            f"Пример для этой базы: {example}. Такой адрес — образец формы, "
+            "а не настоящий: подставь свой хост, базу и пользователя."
+            if example else ""
+        )
+
+    def _save(self) -> None:
+        messages, errors = dbhub.add_source(
+            self.dest, self.name.text(), self._current_type(),
+            self.dsn.text(), self.readonly.isChecked(), self.max_rows.value(),
+        )
+        if errors:
+            # Окно не закрывается: человек должен видеть, что именно не так,
+            # и поправить хотя бы то, что поправимо с клавиатуры.
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
 class CapsTab(ScrollPage):
     """Возможности базы для opencode — установка по выбору.
 
@@ -2539,16 +2673,34 @@ class CapsTab(ScrollPage):
         self.btn_reg_auto = QPushButton("Настроить автоматически")
         self.btn_reg_auto.setToolTip(
             "Android Studio: поставить плагин из набора программы, включить "
-            "сервер в студии, проверить его и вписать в настройки opencode"
+            "сервер в студии, проверить его и вписать в настройки opencode. "
+            "DBHub: проверить связь с базой живым запросом и вписать сервер"
         )
         self.btn_reg_auto.setEnabled(False)
         self.btn_reg_off = QPushButton("Выключить")
         self.btn_reg_src = QPushButton("Открыть источник")
+        # Подключения DBHub. Кнопки стоят в общем ряду, но живут только
+        # для своей строки: у остальных серверов подключений к базам нет.
+        self.btn_db_add = QPushButton("Добавить подключение")
+        self.btn_db_add.setToolTip(
+            "DBHub: вписать базу — файл mcp-dbhub.toml рядом с настройками "
+            "opencode. Пароль из строки подключения программа сохранит "
+            "отдельным файлом"
+        )
+        self.btn_db_add.setEnabled(False)
+        self.btn_db_check = QPushButton("Проверить соединение")
+        self.btn_db_check.setToolTip(
+            "DBHub: поднять сервер и спросить у него протоколом, отвечает ли "
+            "база. Ничего не записывает — только говорит, жива ли связь"
+        )
+        self.btn_db_check.setEnabled(False)
         row_mcp.addWidget(self.btn_reg_check)
         row_mcp.addWidget(self.btn_reg_on)
         row_mcp.addWidget(self.btn_reg_auto)
         row_mcp.addWidget(self.btn_reg_off)
         row_mcp.addWidget(self.btn_reg_src)
+        row_mcp.addWidget(self.btn_db_add)
+        row_mcp.addWidget(self.btn_db_check)
         row_mcp.addStretch(1)
         mcp_layout.addLayout(row_mcp)
 
@@ -2591,6 +2743,8 @@ class CapsTab(ScrollPage):
         self.btn_reg_auto.clicked.connect(self._reg_auto)
         self.btn_reg_off.clicked.connect(self._reg_disable)
         self.btn_reg_src.clicked.connect(self._reg_open_source)
+        self.btn_db_add.clicked.connect(self._db_add_source)
+        self.btn_db_check.clicked.connect(self._db_check)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -2654,21 +2808,21 @@ class CapsTab(ScrollPage):
         return mcp_registry.load_manual_config(dest, server.id) is not None
 
     # Серверы, которые программа умеет настроить целиком сама.
-    AUTO_SERVERS = ("android-studio", "obs", "android-emulator")
+    AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub")
 
     def _reg_auto_possible(self, server: mcp_registry.Server | None) -> tuple[bool, str]:
         """Можно ли настроить автоматически и что этому мешает.
 
-        Автонастройка умеет ровно три вещи: Android Studio, OBS и
-        эмулятор Android. Остальные серверы запускаются командой, и
-        «Настроить автоматически» для них был бы кнопкой вроде
+        Автонастройка умеет ровно четыре вещи: Android Studio, OBS,
+        эмулятор Android и DBHub. Остальные серверы запускаются командой,
+        и «Настроить автоматически» для них был бы кнопкой вроде
         работающей.
         """
         if server is None:
             return False, (
                 "Выберите строку в списке: автонастройка есть у Android "
-                "Studio, OBS и Android-эмулятора. У LDPlayer она не нужна — "
-                "ему достаточно кнопки «Включить»."
+                "Studio, OBS, Android-эмулятора и DBHub. У LDPlayer она не "
+                "нужна — ему достаточно кнопки «Включить»."
             )
         if server.id not in self.AUTO_SERVERS:
             return False, (
@@ -2800,6 +2954,31 @@ class CapsTab(ScrollPage):
         # её, а не ждём ошибки по нажатию.
         possible, _ = self._reg_auto_possible(server)
         self.btn_reg_auto.setEnabled(possible)
+        # Кнопки подключений — только у DBHub: больше ни один сервер
+        # не ходит в базы, и «Добавить подключение» у него означало бы
+        # пустую кнопку.
+        is_db = server is not None and server.id == "dbhub"
+        self.btn_db_add.setEnabled(is_db)
+        self.btn_db_check.setEnabled(
+            is_db and bool(dbhub.read_sources(self._reg_dest() or Path()))
+        )
+        if is_db:
+            sources = dbhub.read_sources(self._reg_dest() or Path())
+            if sources:
+                names = ", ".join(s.id for s in sources)
+                self.reg_hint.setText(
+                    f"Подключения DBHub: {names}. «Проверить соединение» "
+                    "поднимает сервер и спрашивает протоколом, отвечает ли "
+                    "база. «Настроить автоматически» делает то же и вписывает "
+                    "сервер в настройки opencode."
+                )
+            else:
+                self.reg_hint.setText(
+                    "Подключений к базам пока нет: у DBHub без них нечего "
+                    "проверять и нечего включать. Начни с «Добавить подключение»."
+                )
+        else:
+            self.reg_hint.clear()
         if server is None:
             self.reg_detail.setPlainText("Выберите сервер, чтобы увидеть подробности.")
             return
@@ -2891,13 +3070,82 @@ class CapsTab(ScrollPage):
             self._reg_ask_config(server, dest)
             return
 
+        # DBHub без подключения к базе — блок, которому нечего отдавать,
+        # а с нерабочей базой — блок, который opencode будет ждать 30
+        # секунд и покажет «Не удалось». Поэтому у него «Включить» идёт
+        # тем же путём, что автонастройка: сначала живая проверка связи,
+        # и только потом запись.
+        if server.id == "dbhub":
+            self._reg_auto()
+            return
+
         def job(progress):
             return mcp_registry.enable(dest, server, progress=progress)
 
         self._start(job, "registry")
 
+    def _db_add_source(self) -> None:
+        """Вписывает подключение к базе в файл DBHub.
+
+        Подключение — не настройка opencode, а отдельный файл рядом с
+        ними. Поэтому он живёт не в кнопке «Включить», а в своей:
+        вписать базу можно и до включения сервера, и для второй базы.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "dbhub":
+            self._warn("Подключения к базам есть только у DBHub. "
+                       "Выберите его строку в списке.")
+            return
+
+        dialog = DbhubConnectionDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self.log.add(
+            "Дальше — «Проверить соединение»: живая проверка скажет, "
+            "отвечает ли база, до записи в настройки opencode.", "ok"
+        )
+        self._reg_show_detail()
+
+    def _db_check(self) -> None:
+        """Живая проверка связи с базами DBHub.
+
+        Настоящий разговор с сервером по протоколу MCP: сервер поднимает
+        сама программа, отвечает он или нет — видно по ответу, а не по
+        тому, что порт занят. Ничего не записывает.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "dbhub":
+            self._warn("Проверять связь с базой умеет только DBHub. "
+                       "Выберите его строку в списке.")
+            return
+        sources = dbhub.read_sources(dest)
+        if not sources:
+            self._warn("Подключений нет. Нажми «Добавить подключение» "
+                       "и впиши базу.")
+            return
+
+        def job(progress):
+            return dbhub.check_connection(dest, sources, progress=progress)
+
+        self._start(job, "dbhub")
+
     def _reg_auto(self) -> None:
-        """Настраивает Android Studio целиком, без конфигураций вручную."""
+        """Настраивает сервер целиком, без конфигураций вручную.
+
+        Автонастройка умеет Android Studio, OBS, эмулятор и DBHub.
+        У DBHub она упирается в подключение: без вписанной базы проверять
+        нечего, поэтому сначала предлагается «Добавить подключение».
+        """
         dest = self._reg_dest()
         if dest is None:
             self._warn("Не выбрана папка настроек opencode.")
@@ -2945,6 +3193,8 @@ class CapsTab(ScrollPage):
                 return bridges.auto_setup_obs(
                     dest, server, password, progress=progress,
                     allow_install_path_fix=fix_install_path)
+            if server.id == "dbhub":
+                return dbhub.auto_setup(dest, server, progress=progress)
             return bridges.auto_setup_emulator(dest, server, progress=progress)
 
         self._start(job, "registry")
