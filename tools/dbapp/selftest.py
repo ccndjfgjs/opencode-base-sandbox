@@ -2953,14 +2953,21 @@ def main() -> int:
 
 
     # ---- 8б. Новые пресеты провайдеров — туда же, во временную папку.
-    psel = {"ollama", "lmstudio"}
+    # Ставим все пресеты, сколько их есть: «статус видит пресеты» ниже
+    # проверяет список целиком, и незамеченный новый пресет ронял бы
+    # проверку не по делу.
+    psel = set(opencode_caps.PROVIDER_PRESETS)
     _, perrors = opencode_caps.install_providers(fake, psel)
     check(not perrors, f"провайдеры вписаны без ошибок: {perrors or 'чисто'}")
     pcfg = (fake / "opencode.jsonc").read_text(encoding="utf-8")
     check(opencode_caps.check_jsonc(pcfg), "настройки валидны после пресетов")
-    check('"ollama"' in pcfg and '"lmstudio"' in pcfg,
-          "оба пресета на месте")
+    check('"ollama"' in pcfg and '"lmstudio"' in pcfg
+          and '"omniroute"' in pcfg,
+          "все пресеты на месте, включая omniroute")
     check("sk-" not in pcfg, "никаких ключей в файл не попало")
+    check("sk_omniroute" in pcfg,
+          "у пресета OmniRoute — литерал-заглушка из его документации, "
+          "а не ключ")
     _, perrors2 = opencode_caps.install_providers(fake, psel)
     check(not perrors2, "повтор провайдеров без ошибок")
     pcfg2 = (fake / "opencode.jsonc").read_text(encoding="utf-8")
@@ -2973,7 +2980,7 @@ def main() -> int:
           "после уборки валидно и чисто")
     check('"other"' in pcfg3, "чужое цело после уборки пресетов")
 
-    # Вкладка в окне: три галочки расширений + два провайдера.
+    # Вкладка в окне: три галочки расширений + три провайдера.
     # Мостов среди галочек нет — они едут с базой и подставляются всегда.
     ctab = window.caps_tab
     check(len(ctab.checks) == 3, f"галочек три: {sorted(ctab.checks)}")
@@ -2982,7 +2989,7 @@ def main() -> int:
           "галочек мостов в окне нет — они едут с базой")
     sel = ctab._selection()
     check({"pc", "ncp"} <= sel, f"мосты входят в выбор всегда: {sorted(sel)}")
-    check(len(ctab.pchecks) == 2, f"провайдеров два: {sorted(ctab.pchecks)}")
+    check(len(ctab.pchecks) == 3, f"провайдеров три: {sorted(ctab.pchecks)}")
     check(all(box.isChecked() for box in ctab.checks.values()), "по умолчанию всё отмечено")
     check(not any(box.isChecked() for box in ctab.pchecks.values()),
           "провайдеры по умолчанию не отмечены (ключи — дело человека)")
@@ -4649,12 +4656,10 @@ def main() -> int:
                 _br_tmp, timeout=30, command=[sys.executable, str(_br_bad)])
             check(not _br_ok3 and "Chromium distribution" in _br_note3,
                   f"незапустившийся браузер — отказ со словами сервера: {_br_note3}")
+            check("not found" in _br_note3,
+                  f"и слова сервера целиком, а не пересказ «не получилось»: {_br_note3}")
             check("установлен" in _br_note3,
                   f"и подсказка, что делать: {_br_note3}")
-            _br_ok3, _br_note3 = _br.probe(
-                _br_tmp, timeout=30, command=[sys.executable, str(_br_bad)])
-            check(not _br_ok3 and "not found" in _br_note3,
-                  f"незапустившийся браузер — отказ со словами сервера: {_br_note3}")
 
             # Автонастройка без выбора ничего не пишет: у Яндекса без пути
             # проверять нечего, и в настройки opencode не попадает ничего.
@@ -4700,6 +4705,460 @@ def main() -> int:
                   "и программа говорит, что файл не тронула")
         finally:
             shutil.rmtree(_br_tmp, ignore_errors=True)
+
+    # ---- OmniRoute: мост к шлюзу моделей. --------------------------------
+    # OmniRoute собирает провайдеров моделей за одним адресом. Здесь
+    # проверяется всё, что можно проверить без самой программы: лаунчер,
+    # запись реестра, окружение запуска, живой запрос к API (на поддельном
+    # сервере, который отвечает как настоящий), отбор бесплатных
+    # провайдеров, отказы и идемпотентность. Настоящий OmniRoute в
+    # самопроверку не поднимаем: он весит сотни мегабайт, ставить его в
+    # проверку нельзя — это чужое решение и чужой трафик.
+    import http.server as _or_http  # noqa: PLC0415 — рядом со своей проверкой
+    import os as _or_os  # noqa: PLC0415
+    import socket as _or_socket  # noqa: PLC0415
+    import subprocess as _or_sp  # noqa: PLC0415
+    import threading as _or_thread  # noqa: PLC0415
+    import omniroute as _or_o  # noqa: PLC0415 — рядом лежит, круга нет
+
+    _or_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "omniroute_bridge_launcher.py")
+    check(_or_launcher.is_file(), "лаунчер моста OmniRoute на месте")
+    if _or_launcher.is_file():
+        _or_src = _or_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _or_src,
+              "лаунчер OmniRoute пишет журнал в stderr, а не в stdout")
+        check("omniroute.config_env(" in _or_src,
+              "лаунчер OmniRoute берёт окружение из общего модуля, а не своё")
+        check("--mcp" in _or_src,
+              "лаунчер OmniRoute поднимает сервер по stdio: --mcp")
+        check("def main() -> int" in _or_src and "__main__" in _or_src,
+              "лаунчер OmniRoute запускается сам: main() и __main__")
+        check("PyQt6" not in _or_src and "from PyQt" not in _or_src,
+              "лаунчер OmniRoute не тянет окно программы")
+        check("INITIAL_PASSWORD" not in _or_src and "apiKey" not in _or_src
+              and "sk-" not in _or_src,
+              "лаунчер OmniRoute не знает секретов: ключи живут в панели")
+        check("return 1" in _or_src and "не развёрнут" in _or_src,
+              "и отказывает внятно, если пакета нет, — а не падает молча")
+
+    _or_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "omniroute"), None)
+    check(_or_srv is not None, "сервер omniroute есть в реестре программы")
+    if _or_srv is not None:
+        _or_conn = _or_srv.raw.get("connection") or {}
+        _or_cmd = [str(part) for part in _or_conn.get("command") or []]
+        check(_or_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _or_cmd
+              and any("omniroute_bridge_launcher.py" in part for part in _or_cmd),
+              "команда omniroute — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _or_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде omniroute нет настоящих путей: {_or_cmd}")
+        check(_or_conn.get("warm_up") is False,
+              "у omniroute прогрев не включён: пакет ставит программа, а не npx")
+        check(_or_srv.license == "MIT"
+              and _or_srv.raw.get("tools_count") == 110,
+              f"лицензия и число инструментов из живой проверки: "
+              f"{_or_srv.license}, {_or_srv.tools_count}")
+        check(any(r.value == "node" and r.min_version == 22
+                  for r in _or_srv.requirements),
+              "порог Node.js 22 — из engines пакета omniroute")
+        check(len(_or_srv.raw.get("setup_steps") or []) == 7,
+              "у omniroute семь шагов настройки — как у остальных мостов")
+        _or_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("omniroute" in (_or_node.get("required_by") or []),
+              "omniroute записан в «нужно мостам» у Node.js")
+        _or_record = json.dumps(_or_srv.raw, ensure_ascii=False)
+        check("password" not in _or_record.lower()
+              and "STORAGE_ENCRYPTION_KEY" not in _or_record
+              and "sk-" not in _or_record,
+              "в записи реестра нет ни одного секрета")
+        check(_or_srv.raw.get("program_install", {}).get("method") == "none"
+              and _or_srv.raw.get("program_install", {}).get("bridge") == "bundled",
+              "шлюз ставит сама программа: method none, мост внутри программы")
+
+    # Пути и окружение: куда ставится, где живут данные, на каком адресе API.
+    check(_or_o.SERVER_DIR == _root / "tools" / "thirdparty" / "omniroute",
+          f"папка моста своя, внутри программы: {_or_o.SERVER_DIR}")
+    check(str(_or_o.ENTRY).replace("\\", "/").endswith(
+              "node_modules/omniroute/bin/omniroute.mjs"),
+          f"точка входа — bin/omniroute.mjs из пакета: {_or_o.ENTRY.name}")
+    check(_or_o.LAUNCHER.is_file(), "модуль знает свой лаунчер")
+    check(_or_o.base_url() == "http://127.0.0.1:20128",
+          f"адрес панели и API один: {_or_o.base_url()}")
+
+    _or_tmp = Path(tempfile.mkdtemp(prefix="omniroute-selftest-"))
+    _or_orig_node = _or_o.node_exe
+    _or_save = (_or_o.ENTRY, _or_o.SERVER_DIR, _or_o._run,
+                _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT, _or_o.npm_exe)
+    try:
+        _or_dest = _or_tmp / "настройки"
+        _or_dest.mkdir()
+        check(_or_o.data_dir(_or_dest) == _or_dest / "omniroute-data",
+              "папка данных — рядом с настройками opencode")
+        _or_env = _or_o.config_env(_or_dest)
+        check(_or_env.get("DATA_DIR") == str(_or_dest / "omniroute-data")
+              and Path(_or_env["DATA_DIR"]).is_dir(),
+              f"лаунчеру и серверу уходит один DATA_DIR: {_or_env.get('DATA_DIR')}")
+        check(_or_env.get("PORT") == "20128"
+              and _or_env.get("OMNIROUTE_SERVER_HOST") == "127.0.0.1",
+              "порт из README, интерфейс — только эта машина")
+        check(not [k for k in ("INITIAL_PASSWORD", "STORAGE_ENCRYPTION_KEY",
+                               "OMNIROUTE_API_KEY", "REQUIRE_API_KEY")
+                   if k in _or_env],
+              "секретов и ключей окружение не выставляет")
+        check(any("omniroute.mjs" in part for part in _or_o.command(["--mcp"])),
+              f"команда запуска — точка входа пакета: {_or_o.command(['--mcp'])[1:]}")
+
+        # Пакета нет — «развёрнут» не должно быть правдой. Патчим и папку
+        # моста: на машине, где пакет уже поставлен, иначе версия нашлась
+        # бы в файлах, а состояние было бы неправдой.
+        _or_o.SERVER_DIR = _or_tmp / "папка-моста-нет"
+        _or_o.ENTRY = (_or_o.SERVER_DIR / "node_modules" / "omniroute"
+                       / "bin" / "omniroute.mjs")
+        check(_or_o.SERVER_DIR.is_dir() is False and _or_o.deployed() is False,
+              "без папки пакета мост не считается развёрнутым")
+        check("не развёрнут" in _or_o.status_text(_or_dest),
+              f"и статус говорит об этом словами: "
+              f"{_or_o.status_text(_or_dest)[:60]}")
+        _or_o.SERVER_DIR = _or_save[1]
+        _or_o.ENTRY = _or_tmp / "нет-такого-omniroute.mjs"
+
+        # Поддельный сервер API: отвечает как настоящий, без OmniRoute.
+        # Он нужен и живой проверке, и подключению провайдеров — обе ходят
+        # на тот же адрес.
+        def _or_api(body: str, status: int = 200):
+            class _OrHandler(_or_http.BaseHTTPRequestHandler):
+                def do_GET(self):  # noqa: N802 — так зовёт http.server
+                    data = body.encode("utf-8")
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def log_message(self, *args):
+                    pass
+
+            server = _or_http.HTTPServer(("127.0.0.1", 0), _OrHandler)
+            _or_thread.Thread(target=server.serve_forever, daemon=True).start()
+            return server, server.server_address[1]
+
+        _or_good, _or_port = _or_api(
+            '{"status": "ok", "timestamp": "2026-10-07T00:00:00.000Z"}')
+        _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT = "127.0.0.1", _or_port
+
+        # Вывод CLI: строки OmniRoute про загруженный .env стоят перед JSON,
+        # и разбор обязан брать объект, а не падать на первой строке.
+        _or_noisy = ("  📋 Loaded env from /tmp/x/.env\n"
+                     "{\n  \"version\": \"3.8.51\",\n  \"uptime\": 12\n}\n")
+        _or_parsed = _or_o._json_from(_or_noisy)
+        check(isinstance(_or_parsed, dict)
+              and _or_parsed.get("version") == "3.8.51",
+              f"JSON из вывода CLI разбирается, несмотря на журнал: {_or_parsed}")
+        check(_or_o._json_from("никакого json тут нет") is None,
+              "а мусор без JSON честно даёт «не разобралось»")
+        check(_or_o._json_from("[{\"id\": \"a\"}, {\"id\": \"b\"}]")
+              == [{"id": "a"}, {"id": "b"}],
+              "и массив JSON тоже разбирается")
+
+        # Отбор бесплатных: без ключа, с ключом, не бесплатные и снятые с
+        # поддержки — на синтетическом каталоге, чтобы правило было видно.
+        _or_keyless, _or_keyed = _or_o._split_free([
+            {"id": "free-noauth", "hasFree": True, "category": "noauth"},
+            {"id": "free-key", "hasFree": True, "category": "api-key"},
+            {"id": "paid", "hasFree": False, "category": "api-key"},
+            {"id": "dead", "hasFree": True, "category": "noauth",
+             "deprecated": True},
+            "мусор",
+        ])
+        check([p["id"] for p in _or_keyless] == ["free-noauth"]
+              and [p["id"] for p in _or_keyed] == ["free-key"],
+              f"бесплатные делятся на «без ключа» и «с ключом»: "
+              f"{[p['id'] for p in _or_keyless]}, {[p['id'] for p in _or_keyed]}")
+        check(all(p["id"] not in ("paid", "dead")
+                  for p in _or_keyless + _or_keyed),
+              "платные и снятые с поддержки в работу не берутся")
+
+        # Поддельный CLI: отвечает как настоящий, а какие команды у него
+        # просят — записываем. Так проверяются и разбор, и сами команды.
+        _or_calls: list[list[str]] = []
+        _or_catalog = {"count": 3, "providers": [
+            {"id": "first-free", "hasFree": True, "category": "noauth"},
+            {"id": "second-free", "hasFree": True, "category": "noauth"},
+            {"id": "with-key", "hasFree": True, "category": "api-key"},
+            {"id": "no-free", "hasFree": False, "category": "api-key"},
+        ]}
+        _or_list = {"providers": [
+            {"id": "1", "provider": "second-free", "name": "second-free"},
+        ]}
+
+        def _or_fake_run(args, dest, timeout=None, progress=None):
+            _or_calls.append(list(args))
+            noise = "  📋 Loaded env from /tmp/x/.env\n"
+            if args[:1] == ["health"]:
+                return 0, noise + json.dumps(
+                    {"status": "healthy", "version": "3.8.51"},
+                    ensure_ascii=False), ""
+            if args[:2] == ["providers", "available"]:
+                return 0, noise + json.dumps(_or_catalog, ensure_ascii=False), ""
+            if args[:2] == ["providers", "list"]:
+                return 0, noise + json.dumps(_or_list, ensure_ascii=False), ""
+            if args[:2] == ["providers", "add"]:
+                _or_list["providers"].append(
+                    {"id": "new", "provider": args[2], "name": args[2]})
+                return 0, noise + json.dumps({"connection": {"id": "new"}}), ""
+            return 0, "", ""
+
+        _or_o._run = _or_fake_run
+        check(_or_o.server_version(_or_dest) == "3.8.51",
+              f"версия сервера берётся из ответа API: "
+              f"{_or_o.server_version(_or_dest)}")
+
+        _or_kl, _or_ky, _or_trouble = _or_o.catalog(_or_dest)
+        check(not _or_trouble
+              and [p["id"] for p in _or_kl] == ["first-free", "second-free"]
+              and [p["id"] for p in _or_ky] == ["with-key"],
+              f"каталог провайдеров разобран: {[p['id'] for p in _or_kl]}")
+        check(any(call[:2] == ["providers", "available"] for call in _or_calls),
+              "и спрошен командой самого OmniRoute: providers available")
+
+        _or_have, _or_trouble = _or_o.configured_providers(_or_dest)
+        check(not _or_trouble and "second-free" in _or_have,
+              f"подключённые провайдеры прочитаны: {sorted(_or_have)}")
+
+        # Подключение бесплатных: что уже стоит — не трогаем, чего нет —
+        # добавляем той же командой, что советует README.
+        _or_calls.clear()
+        _or_msgs, _or_errs = _or_o.sync_free_providers(_or_dest)
+        _or_added = [call[2] for call in _or_calls
+                     if call[:2] == ["providers", "add"]]
+        check(not _or_errs, f"подключение бесплатных прошло: {_or_errs[:1]}")
+        check(_or_added == ["first-free"],
+              f"добавлен только отсутствующий: {_or_added}")
+        check(all("--allow-no-credential" in call and "--yes" in call
+                  for call in _or_calls if call[:2] == ["providers", "add"]),
+              "и команда без спроса ключа: --allow-no-credential --yes")
+        check(not [call for call in _or_calls if call[:2] == ["providers", "add"]
+                   and "with-key" in call],
+              "бесплатный с ключом не подключён: ключа сервиса у программы нет")
+        check(any("требуют ключ" in m for m in _or_msgs),
+              f"и сказано словами, что остальные ждут ключ: {_or_msgs[-1:]}")
+
+        # Список бесплатных изменился (новая версия каталога): новый
+        # провайдер добавляется, старые не подключаются второй раз.
+        _or_catalog["providers"].append(
+            {"id": "third-free", "hasFree": True, "category": "noauth"})
+        _or_calls.clear()
+        _or_msgs2, _or_errs2 = _or_o.sync_free_providers(_or_dest)
+        _or_added2 = [call[2] for call in _or_calls
+                      if call[:2] == ["providers", "add"]]
+        check(not _or_errs2 and _or_added2 == ["third-free"],
+              f"изменившийся список подхватывается сам: {_or_added2}")
+        check("first-free" not in _or_added2,
+              "и уже подключённые не добавляются второй раз")
+
+        # Список подключённых не прочитался — добавлять вслепую нельзя.
+        _or_o._run = lambda args, dest, timeout=None, progress=None: (
+            1, "", "таймаут") if args[:2] == ["providers", "list"] else (
+            0, json.dumps(_or_catalog, ensure_ascii=False), "")
+        _or_msgs3, _or_errs3 = _or_o.sync_free_providers(_or_dest)
+        check(bool(_or_errs3),
+              f"без списка подключённых подключение не идёт: {_or_errs3[:1]}")
+        _or_o._run = _or_fake_run
+
+        # Живая проверка — настоящий запрос к API.
+        _or_msgs4, _or_errs4 = _or_o.check_connection(_or_dest)
+        check(not _or_errs4,
+              f"живая проверка проходит на отвечающем API: {_or_errs4[:1]}")
+        check(any("/api/health" in m and "ok" in m for m in _or_msgs4),
+              f"и это настоящий запрос к API, а не взгляд на файлы: "
+              f"{_or_msgs4[:1]}")
+        check("отвечает" in _or_o.status_text(_or_dest),
+              f"статус видит живой API: {_or_o.status_text(_or_dest)[:60]}")
+        check("провайдер" in _or_o.status_text(_or_dest),
+              f"и говорит, сколько провайдеров подключено: "
+              f"{_or_o.status_text(_or_dest)[-40:]}")
+
+        # Молчащий порт — отказ, а не «работает».
+        _or_closed = _or_socket.socket()
+        _or_closed.bind(("127.0.0.1", 0))
+        _or_free_port = _or_closed.getsockname()[1]
+        _or_closed.close()
+        _or_o.DEFAULT_PORT = _or_free_port
+        _or_ok5, _or_data5, _or_note5 = _or_o.health(_or_dest, timeout=2)
+        check(not _or_ok5 and "не ответил" in _or_note5,
+              f"молчащий порт — отказ: {_or_note5[:70]}")
+
+        # Ответ есть, а «ok» в нём нет — тоже отказ.
+        _or_bad, _or_port2 = _or_api('{"status": "degraded"}')
+        _or_o.DEFAULT_PORT = _or_port2
+        _or_ok6, _or_data6, _or_note6 = _or_o.health(_or_dest, timeout=3)
+        check(not _or_ok6 and _or_data6.get("status") == "degraded",
+              f"ответ без «ok» живой проверкой не считается: {_or_note6[:70]}")
+        _or_bad.shutdown()
+
+        # Мусор вместо JSON — тоже отказ: чужой процесс за портом.
+        _or_junk, _or_port3 = _or_api("привет, я не JSON")
+        _or_o.DEFAULT_PORT = _or_port3
+        _or_ok7, _or_data7, _or_note7 = _or_o.health(_or_dest, timeout=3)
+        check(not _or_ok7 and "не разобрался" in _or_note7,
+              f"мусор вместо JSON — тоже отказ: {_or_note7[:70]}")
+        _or_junk.shutdown()
+
+        # Ожидание ответа: ждём API, а не «процесс жив».
+        _or_up, _or_port4 = _or_api('{"status": "ok"}')
+        _or_o.DEFAULT_PORT = _or_port4
+        _or_got, _or_bad8 = _or_o.wait_ready(_or_dest, timeout=10)
+        check(not _or_bad8 and any("ответил" in m for m in _or_got),
+              f"ожидание дожидается ответа API: {_or_got[:1]}")
+        _or_up.shutdown()
+        _or_good.shutdown()
+        _or_o.DEFAULT_PORT = _or_save[4]
+
+        # Отказы: нет пакета — не запускаем и в настройки не пишем.
+        _or_msgs9, _or_errs9 = _or_o.start(_or_dest)
+        check(bool(_or_errs9) and "не развёрнут" in _or_errs9[0],
+              f"без пакета запуск отказывает: {_or_errs9[:1]}")
+        check(not (_or_dest / "opencode.jsonc").exists(),
+              "и в настройки opencode ничего не вписано")
+
+        # «Запустить» поднимает мост и сразу подключает бесплатных: каталог
+        # читается заново при каждом запуске, поэтому изменившийся список
+        # подхватывается без отдельного шага.
+        _or_good2, _or_port5 = _or_api('{"status": "ok"}')
+        _or_o.DEFAULT_PORT = _or_port5
+        # «Развёрнут» — только на время этих проверок: файл-заглушка на
+        # месте точки входа и Node.js из самого Python. Дальше флаг
+        # «развёрнут» снова выключен, чтобы отказы проверялись честно.
+        _or_fake_entry = _or_tmp / "omniroute.mjs"
+        _or_fake_entry.write_text("// заглушка самопроверки\n", encoding="utf-8")
+        _or_o.ENTRY = _or_fake_entry
+        _or_save_node = _or_o.node_exe
+        _or_o.node_exe = lambda: sys.executable
+        _or_catalog["providers"].append(
+            {"id": "fourth-free", "hasFree": True, "category": "noauth"})
+        _or_calls.clear()
+        _or_msgs12, _or_errs12 = _or_o.bring_up(_or_dest)
+        _or_added12 = [call[2] for call in _or_calls
+                       if call[:2] == ["providers", "add"]]
+        check(not _or_errs12 and any("ответил" in m for m in _or_msgs12),
+              f"«Запустить» поднимает сервер и ждёт ответа API: "
+              f"{_or_msgs12[:1]}")
+        check(_or_added12 == ["fourth-free"],
+              f"и тут же подключает бесплатных из свежего каталога: "
+              f"{_or_added12}")
+        _or_good2.shutdown()
+        _or_o.DEFAULT_PORT = _or_save[4]
+        _or_o.node_exe = _or_save_node
+        _or_o.ENTRY = _or_tmp / "нет-такого-omniroute.mjs"
+
+        # Сервер не поднялся — провайдеров не трогаем: подключать их некуда.
+        _or_calls.clear()
+        _or_msgs13, _or_errs13 = _or_o.bring_up(_or_dest)
+        check(bool(_or_errs13) and not _or_calls,
+              f"без сервера провайдеры не трогаются: {_or_errs13[:1]}")
+
+        _or_o.npm_exe = lambda: None
+        _or_o.SERVER_DIR = _or_tmp / "папка-моста"
+        _or_o.SERVER_DIR.mkdir()
+        _or_msgs10, _or_errs10 = _or_o.deploy()
+        check(bool(_or_errs10) and "npm" in _or_errs10[0],
+              f"без npm развёртывание отказывает и говорит про Node.js: "
+              f"{_or_errs10[:1]}")
+        check(not (_or_o.SERVER_DIR / "node_modules").exists(),
+              "и ничего не ставит в папку моста")
+        _or_msgs11, _or_errs11 = _or_o.auto_setup(_or_dest, _or_srv)
+        check(bool(_or_errs11)
+              and any("ничего не вписано" in e for e in _or_errs11),
+              f"автонастройка без пакета отказывает и говорит об этом: "
+              f"{_or_errs11[-1:]}")
+        check(not (_or_dest / "opencode.jsonc").exists(),
+              "и снова ничего не пишет в настройки")
+        _or_o.npm_exe = _or_save[5]
+
+        # Командная строка моста: то же, что кнопки окна, и без секретов.
+        _or_cli = _or_launcher.parent.parent / "omniroute.py"
+        _or_cli_env = dict(_or_os.environ)
+        _or_cli_env["OPENCODE_CONFIG_DIR"] = str(_or_dest)
+        _or_help = _or_sp.run(
+            [sys.executable, str(_or_cli), "--help"],
+            capture_output=True, text=True, encoding="utf-8", env=_or_cli_env,
+            timeout=60)
+        check(_or_help.returncode == 0
+              and all(word in _or_help.stdout
+                      for word in ("status", "restart", "deploy", "sync")),
+              f"у моста есть командная строка для скилла: "
+              f"{_or_help.stdout.strip()[:60]}")
+        _or_unknown = _or_sp.run(
+            [sys.executable, str(_or_cli), "абракадабра"],
+            capture_output=True, text=True, encoding="utf-8", env=_or_cli_env,
+            timeout=60)
+        check(_or_unknown.returncode == 2
+              and "Не знаю такой команды" in _or_unknown.stdout,
+              f"неизвестная команда не делается молча: "
+              f"{_or_unknown.stdout.strip()[:60]}")
+
+        # Идемпотентность: повторное включение не переписывает настройки.
+        _or_cfg_dest = _or_tmp / "настройки-включения"
+        _or_cfg_dest.mkdir()
+        (_or_cfg_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _or_clone = copy.copy(_or_srv)
+        _or_clone.raw = dict(_or_srv.raw)
+        _or_clone.raw["connection"] = dict(_or_srv.raw.get("connection") or {},
+                                           warm_up=False)
+        _or_clone.requirements = []
+        _or_clone.has_connection = True
+        _or_e1, _or_ee1 = _mcp_registry.enable(_or_cfg_dest, _or_clone)
+        _or_c1 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _or_e2, _or_ee2 = _mcp_registry.enable(_or_cfg_dest, _or_clone)
+        _or_c2 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _or_ee1 and '"omniroute"' in _or_c1
+              and "omniroute_bridge_launcher.py" in _or_c1,
+              f"включение omniroute пишет блок в настройки: {_or_ee1}")
+        check("{PROGRAM}" not in _or_c1,
+              "и настоящий путь лаунчера подставлен, а не плейсхолдер")
+        check(_or_c1 == _or_c2 and _or_c2.count('"omniroute"') == 1,
+              "повторное включение omniroute не меняет файл настройки")
+        check(any("не трогаю" in m for m in _or_e2),
+              "и программа говорит, что файл не тронула")
+
+        # Провайдер OmniRoute в настройках opencode: через тот же механизм
+        # пресетов, что у Ollama и LM Studio, и тоже идемпотентно.
+        _or_p1, _or_pe1 = opencode_caps.install_providers(
+            _or_cfg_dest, {"omniroute"})
+        _or_pcfg1 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _or_p2, _or_pe2 = opencode_caps.install_providers(
+            _or_cfg_dest, {"omniroute"})
+        _or_pcfg = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _or_pe1 and not _or_pe2,
+              f"пресет провайдера ставится без ошибок: "
+              f"{_or_pe1 or _or_pe2 or 'чисто'}")
+        check(_or_pcfg == _or_pcfg1,
+              "повтор провайдера не меняет файл настроек")
+        _or_name_count = _or_pcfg.count('"omniroute"')
+        check(_or_name_count == 2,
+              f"имя omniroute стоит дважды — в mcp и в provider: "
+              f"{_or_name_count}")
+        check(opencode_caps.check_jsonc(_or_pcfg),
+              "настройки остались валидными")
+        check(opencode_caps.providers_status(_or_cfg_dest).get("omniroute") is True,
+              "статус видит пресет OmniRoute")
+        check("localhost:20128/v1" in _or_pcfg,
+              "адрес провайдера — панель и API из README")
+        check("sk-" not in _or_pcfg and "sk_omniroute" in _or_pcfg,
+              "и в настройках только литерал-заглушка, а не ключ")
+        check(opencode_caps.PROVIDER_PRESETS["omniroute"][1] == "",
+              "ключ у пресета не спрашивается: он в панели OmniRoute")
+    finally:
+        (_or_o.ENTRY, _or_o.SERVER_DIR, _or_o._run,
+         _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT, _or_o.npm_exe) = _or_save
+        _or_o.node_exe = _or_orig_node
+        shutil.rmtree(_or_tmp, ignore_errors=True)
 
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
@@ -5801,9 +6260,9 @@ def main() -> int:
     # --- настоящий реестр
     _base = core.program_root()
     _servers = mcp_registry.load_servers(_base)
-    check(len(_servers) == 10, f"реестр читается, 10 серверов: {len(_servers)}")
+    check(len(_servers) == 11, f"реестр читается, 11 серверов: {len(_servers)}")
     check(all(s.program_install is not None for s in _servers),
-          "у всех 10 серверов есть блок program_install")
+          "у всех 11 серверов есть блок program_install")
     _by_id = {s.id: s.program_install for s in _servers}
     if all(_by_id.values()):
         check(_by_id["blender"].winget_id == "BlenderFoundation.Blender"
@@ -5886,13 +6345,13 @@ def main() -> int:
         check(any("серверов 0" in b for b in _bad2),
               f"и называет причину — ноль серверов: {(_bad2 or [''])[0][:70]}")
 
-        # Все десять на месте, и у каждого четыре ответа.
+        # Все одиннадцать на месте, и у каждого четыре ответа.
         _views = pmod.server_views(_base)
-        check(len(_views) == 10, f"движок прочитал все десять серверов: {len(_views)}")
+        check(len(_views) == 11, f"движок прочитал все одиннадцать серверов: {len(_views)}")
         _by = {v.id: v for v in _views}
         for _sid in ("windows-admin", "excel", "blender", "adobe-creativity",
                      "android-studio", "obs", "android-emulator", "ldplayer",
-                     "dbhub", "browsers"):
+                     "dbhub", "browsers", "omniroute"):
             check(_sid in _by, f"сервер {_sid} есть в движке")
 
         # Порог версии сравнивается, а не просто запоминается. Пример DBHub
@@ -5981,8 +6440,8 @@ def main() -> int:
         _needs = pmod.bridge_needs(_base)
         check(len(_needs) == 2, f"в разделе «нужно мостам» два предмета: {len(_needs)}")
         _nn = {n.program: n for n in _needs}
-        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 5,
-              "Node.js требуют пятеро серверов из десяти")
+        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 6,
+              "Node.js требуют шестеро серверов из одиннадцати")
         check(_nn.get("Node.js") is not None
               and _nn["Node.js"].install.winget_id == "OpenJS.NodeJS.LTS",
               "у Node.js настоящий идентификатор winget")
@@ -6227,7 +6686,7 @@ def main() -> int:
     if pcard is not None and wmod is not None:
         _pbase = core.program_root()
         _cards = pcard.cards(_pbase)
-        check(len(_cards) >= 10, f"карточек не меньше десяти: {len(_cards)}")
+        check(len(_cards) >= 11, f"карточек не меньше одиннадцати: {len(_cards)}")
         check(pcard.section_problem(_pbase) == "",
               f"данные для карточек целы: {pcard.section_problem(_pbase)[:60]}")
 
@@ -6237,8 +6696,8 @@ def main() -> int:
         check(_node is not None, "Node.js — карточка есть")
         _node_servers = set(_node.servers) if _node else set()
         check(_node_servers == {"windows-admin", "excel", "obs", "dbhub",
-                               "browsers"},
-              f"Node.js одной карточкой на пятерых серверов: {sorted(_node_servers)}")
+                               "browsers", "omniroute"},
+              f"Node.js одной карточкой на шестерых серверов: {sorted(_node_servers)}")
         check(sum(1 for c in _cards if c.name == "Node.js") == 1,
               "и не двумя карточками, как он описан в реестре")
         check("нужна:" in pcard.needed_by_text(_node, pcard.servers_by_name(_pbase)),

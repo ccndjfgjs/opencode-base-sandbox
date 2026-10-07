@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Возможности базы для opencode — установка по выбору.
 
 Простыми словами: ставит в настройки opencode команду /голос, мост ПК,
@@ -687,6 +687,32 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
         "      },\n"
         '      "models": {\n'
         '        "local-model": {"name": "Модель из LM Studio (поправь id)"}\n'
+        "      }\n"
+        "    },",
+    ),
+    # Формат записи и модели — из документации самого OmniRoute
+    # (docs/frameworks/OPENCODE.md): тот же npm-пакет, что у двух пресетов
+    # выше, адрес — панель и API на одном порту 20128, `auto` — модель,
+    # которую советует сам OmniRoute. Ключ `sk_omniroute` — не секрет, а
+    # литерал-заглушка: так пишет собственная команда
+    # `omniroute config opencode` для локального режима, где проверка
+    # ключа выключена и запросы идут с этой машины. Секретов провайдеров
+    # (ключей сервисов) в записи нет: их человек вписывает в панели
+    # OmniRoute, и в opencode.jsonc они не попадают.
+    "omniroute": (
+        "OmniRoute (локальный шлюз, ставится в блоке «Серверы MCP»)",
+        "",
+        '"omniroute": {\n'
+        '      "npm": "@ai-sdk/openai-compatible",\n'
+        '      "name": "OmniRoute",\n'
+        '      "options": {\n'
+        '        "baseURL": "http://localhost:20128/v1",\n'
+        '        "apiKey": "sk_omniroute"\n'
+        "      },\n"
+        '      "models": {\n'
+        '        "auto": {"name": "Автовыбор модели OmniRoute"},\n'
+        '        "claude-sonnet-4-5-thinking": {"name": "Claude Sonnet 4.5 Thinking"},\n'
+        '        "gemini-3-flash": {"name": "Gemini 3 Flash"}\n'
         "      }\n"
         "    },",
     ),

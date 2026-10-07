@@ -1,0 +1,9 @@
+{
+  "name": "opencode-base-omniroute-bridge",
+  "private": true,
+  "description": "Мост OmniRoute: сюда ставится пакет omniroute из npm. Программа ставит его сама кнопкой «Развернуть», в служебные папки пакетов при этом ничего не пишется.",
+  "license": "MIT",
+  "dependencies": {
+    "omniroute": "^3.8.51"
+  }
+}

@@ -22,11 +22,12 @@ if __package__ in (None, ""):
     import bridges  # type: ignore[import-not-found]
     import browsers  # type: ignore[import-not-found]
     import dbhub  # type: ignore[import-not-found]
+    import omniroute  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   browsers, dbhub, program_cards, winget_install)
+                   browsers, dbhub, omniroute, program_cards, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2885,6 +2886,37 @@ class CapsTab(ScrollPage):
             "браузер и видно ли страницу"
         )
         self.btn_br_check.setEnabled(False)
+        # Кнопки OmniRoute. Своя строка и своя работа: развернуть пакет,
+        # поднять сервер, перезапустить его и показать состояние. В
+        # opencode ничего из этого не пишет — пишет только автонастройка.
+        self.btn_or_deploy = QPushButton("Развернуть")
+        self.btn_or_deploy.setToolTip(
+            "OmniRoute: поставить пакет из npm в свою папку моста. Это "
+            "сотни мегабайт и несколько минут; служебные папки Node.js "
+            "программа не трогает"
+        )
+        self.btn_or_deploy.setEnabled(False)
+        self.btn_or_start = QPushButton("Запустить")
+        self.btn_or_start.setToolTip(
+            "OmniRoute: поднять локальный сервер (панель и API на "
+            "http://127.0.0.1:20128) и дождаться ответа API. Ничего не "
+            "записывает в настройки opencode"
+        )
+        self.btn_or_start.setEnabled(False)
+        self.btn_or_restart = QPushButton("Перезапустить")
+        self.btn_or_restart.setToolTip(
+            "OmniRoute: остановить сервер и поднять снова, затем живая "
+            "проверка. Так же лечится зависший мост. Заново подключает "
+            "бесплатных провайдеров без ключа"
+        )
+        self.btn_or_restart.setEnabled(False)
+        self.btn_or_status = QPushButton("Показать статус")
+        self.btn_or_status.setToolTip(
+            "OmniRoute: что развёрнуто, отвечает ли API, какая версия и "
+            "сколько провайдеров подключено. Ни ключей, ни токенов в "
+            "ответе нет"
+        )
+        self.btn_or_status.setEnabled(False)
         row_mcp.addWidget(self.btn_reg_check)
         row_mcp.addWidget(self.btn_reg_on)
         row_mcp.addWidget(self.btn_reg_auto)
@@ -2894,6 +2926,10 @@ class CapsTab(ScrollPage):
         row_mcp.addWidget(self.btn_db_check)
         row_mcp.addWidget(self.btn_br_choose)
         row_mcp.addWidget(self.btn_br_check)
+        row_mcp.addWidget(self.btn_or_deploy)
+        row_mcp.addWidget(self.btn_or_start)
+        row_mcp.addWidget(self.btn_or_restart)
+        row_mcp.addWidget(self.btn_or_status)
         row_mcp.addStretch(1)
         mcp_layout.addLayout(row_mcp)
 
@@ -2940,6 +2976,10 @@ class CapsTab(ScrollPage):
         self.btn_db_check.clicked.connect(self._db_check)
         self.btn_br_choose.clicked.connect(self._br_choose)
         self.btn_br_check.clicked.connect(self._br_check)
+        self.btn_or_deploy.clicked.connect(self._or_deploy)
+        self.btn_or_start.clicked.connect(self._or_start)
+        self.btn_or_restart.clicked.connect(self._or_restart)
+        self.btn_or_status.clicked.connect(self._or_status)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -3004,21 +3044,22 @@ class CapsTab(ScrollPage):
 
     # Серверы, которые программа умеет настроить целиком сама.
     AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub",
-                    "browsers")
+                    "browsers", "omniroute")
 
     def _reg_auto_possible(self, server: mcp_registry.Server | None) -> tuple[bool, str]:
         """Можно ли настроить автоматически и что этому мешает.
 
-        Автонастройка умеет ровно пять вещей: Android Studio, OBS,
-        эмулятор Android, DBHub и браузеры. Остальные серверы запускаются
-        командой, и «Настроить автоматически» для них был бы кнопкой вроде
-        работающей.
+        Автонастройка умеет ровно шесть вещей: Android Studio, OBS,
+        эмулятор Android, DBHub, браузеры и OmniRoute. Остальные серверы
+        запускаются командой, и «Настроить автоматически» для них был бы
+        кнопкой вроде работающей.
         """
         if server is None:
             return False, (
                 "Выберите строку в списке: автонастройка есть у Android "
-                "Studio, OBS, Android-эмулятора, DBHub и Браузеров. У LDPlayer "
-                "она не нужна — ему достаточно кнопки «Включить»."
+                "Studio, OBS, Android-эмулятора, DBHub, Браузеров и "
+                "OmniRoute. У LDPlayer она не нужна — ему достаточно кнопки "
+                "«Включить»."
             )
         if server.id not in self.AUTO_SERVERS:
             return False, (
@@ -3170,6 +3211,13 @@ class CapsTab(ScrollPage):
         is_br = server is not None and server.id == "browsers"
         self.btn_br_choose.setEnabled(is_br)
         self.btn_br_check.setEnabled(is_br)
+        # Кнопки OmniRoute — только у своей строки: у остальных серверов
+        # разворачивать, запускать и перезапускать нечего.
+        is_or = server is not None and server.id == "omniroute"
+        self.btn_or_deploy.setEnabled(is_or)
+        self.btn_or_start.setEnabled(is_or)
+        self.btn_or_restart.setEnabled(is_or)
+        self.btn_or_status.setEnabled(is_or)
         if is_db:
             sources = dbhub.read_sources(self._reg_dest() or Path())
             if sources:
@@ -3200,6 +3248,14 @@ class CapsTab(ScrollPage):
                 "автоматически» делает то же и вписывает сервер в настройки "
                 "opencode."
             )
+        elif is_or:
+            self.reg_hint.setText(
+                "Порядок: «Развернуть» (пакет из npm в папку моста), "
+                "«Запустить» (панель и API на http://127.0.0.1:20128), "
+                "«Показать статус», затем «Настроить автоматически»: она "
+                "подключит бесплатных провайдеров без ключа и впишет мост "
+                "в настройки opencode. Что-то зависнет — «Перезапустить»."
+            )
         else:
             self.reg_hint.clear()
         if server is None:
@@ -3223,6 +3279,19 @@ class CapsTab(ScrollPage):
             lines.append("Запуск: " + " ".join(browsers.command(dest, choice)))
             lines.append(f"Профиль: {browsers.profile_dir(dest, br.key)}")
             lines.append(browsers.hint(br.key, choice))
+        if server.id == "omniroute":
+            # Состояние моста словами: развёрнут ли, отвечает ли API,
+            # какая версия и сколько провайдеров. Здесь же адрес панели:
+            # куда идти человеку за ключами провайдеров.
+            dest = self._reg_dest() or Path()
+            lines.append("")
+            lines.append(omniroute.status_text(dest))
+            lines.append(f"Панель и API: http://{omniroute.DEFAULT_HOST}:{omniroute.DEFAULT_PORT}")
+            lines.append(f"Папка данных: {omniroute.data_dir(dest)}")
+            lines.append(
+                "Ключи провайдеров лежат в папке данных и в настройки "
+                "opencode не попадают."
+            )
         if raw.get("why"):
             lines.append("")
             lines.append(str(raw["why"]))
@@ -3424,12 +3493,86 @@ class CapsTab(ScrollPage):
 
         self._start(job, "browsers")
 
+    def _or_target(self) -> Path | None:
+        """Папка настроек и строка OmniRoute — общая проверка для кнопок.
+
+        Четыре кнопки моста делают разное, но требование у них одно:
+        выбрана папка настроек opencode и выделена строка «OmniRoute».
+        Иначе нажатие было бы враньём — оно трогало бы чужую строку.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return None
+        if server is None or server.id != "omniroute":
+            self._warn("Это работа строки «OmniRoute». Выберите её в списке.")
+            return None
+        return dest
+
+    def _or_deploy(self) -> None:
+        """Разворачивает OmniRoute в папку моста. В opencode не пишет."""
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.deploy(progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_start(self) -> None:
+        """Поднимает сервер, ждёт ответа API и подключает бесплатных.
+
+        В opencode не пишет. Провайдеры подключаются здесь же, потому что
+        каталог бесплатных у новой версии мог измениться, а человек про
+        второй шаг помнить не должен.
+        """
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.bring_up(dest, progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_restart(self) -> None:
+        """Перезапускает сервер и заново подключает бесплатных провайдеров.
+
+        Так же лечится зависший или упавший мост. Каталог бесплатных
+        провайдеров читается заново, поэтому изменившийся список
+        подхватывается сам.
+        """
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.restart(dest, progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_status(self) -> None:
+        """Показывает состояние моста словами: ничего не меняет."""
+        dest = self._or_target()
+        if dest is None:
+            return
+        text = omniroute.status_text(dest)
+        self.log.clear_log()
+        self.log.add(text, "ok" if "отвечает" in text else "warn")
+        # Подробности под таблицей обновляются тем же текстом: там его
+        # видно, не открывая журнал.
+        self._reg_show_detail()
+
     def _reg_auto(self) -> None:
         """Настраивает сервер целиком, без конфигураций вручную.
 
-        Автонастройка умеет Android Studio, OBS, эмулятор и DBHub.
-        У DBHub она упирается в подключение: без вписанной базы проверять
-        нечего, поэтому сначала предлагается «Добавить подключение».
+        Автонастройка умеет Android Studio, OBS, эмулятор, DBHub, браузеры
+        и OmniRoute. У DBHub она упирается в подключение: без вписанной
+        базы проверять нечего, поэтому сначала предлагается «Добавить
+        подключение». У OmniRoute порядок другой: развернуть, запустить,
+        получить ответ API — и только потом писать в настройки.
         """
         dest = self._reg_dest()
         if dest is None:
@@ -3482,6 +3625,8 @@ class CapsTab(ScrollPage):
                 return dbhub.auto_setup(dest, server, progress=progress)
             if server.id == "browsers":
                 return browsers.auto_setup(dest, server, progress=progress)
+            if server.id == "omniroute":
+                return omniroute.auto_setup(dest, server, progress=progress)
             return bridges.auto_setup_emulator(dest, server, progress=progress)
 
         self._start(job, "registry")
