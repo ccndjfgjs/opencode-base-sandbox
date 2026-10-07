@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Возможности базы для opencode — установка по выбору.
 
 Простыми словами: ставит в настройки opencode команду /голос, мост ПК,
@@ -38,15 +38,39 @@ CAPS = (
     ("ncp", "Мост NCP (авто)"),
     ("agents", "12 агентов"),
     ("antiblock", "Обход блокировок"),
+    ("rtk", "rtk — вывод команд короче"),
+    ("caveman", "caveman — ответы короче"),
+    ("pxpipe", "pxpipe — запросы картинками"),
+    ("auto-improve", "auto-improve — улучшение текста"),
+    ("greenlight", "greenlight — проверка iOS-перед App Store"),
 )
 
 #: Что вкладка «opencode» спрашивает у человека: только расширения.
 #: Мостов здесь нет — они едут с базой и включаются всегда.
+#: rtk, caveman, pxpipe, auto-improve и greenlight — не MCP-серверы и не
+#: мосты: rtk кладёт в настройки плагин, caveman — правила в AGENTS.md,
+#: pxpipe — запись провайдера на локальный прокси, auto-improve живёт
+#: отметкой в манифесте и копией скрипта, greenlight — собранным из копии
+#: автора бинарником. Все пятеро живут в tools/thirdparty и в реестр
+#: mcp-registry.json не попадают.
 CAPS_CHOICES = (
     ("voice", "Команда /голос"),
     ("agents", "12 агентов"),
     ("antiblock", "Обход блокировок"),
+    ("rtk", "rtk — вывод команд короче"),
+    ("caveman", "caveman — ответы короче"),
+    ("pxpipe", "pxpipe — запросы картинками"),
+    ("auto-improve", "auto-improve — улучшение текста"),
+    ("greenlight", "greenlight — проверка iOS-перед App Store"),
 )
+
+#: Галочки, которые при открытии вкладки стоят снятыми: у rtk нужен
+#: бинарник в PATH, caveman меняет стиль ответов, pxpipe переписывает
+#: запрос картинками, auto-improve тратит токены и коммитит в репозиторий
+#: файла, а greenlight и вовсе нужен только тем, кто делает приложения для
+#: iOS: самому opencode-base (PyQt6, Windows) он не нужен. Включать такое
+#: молча, «по умолчанию», нельзя.
+CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe", "auto-improve", "greenlight")
 
 #: Что подставляется всегда, без галочки: мосты — часть базы, а не опция.
 CAPS_ALWAYS = ("pc", "ncp")
@@ -690,16 +714,65 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
         "      }\n"
         "    },",
     ),
+    # Формат записи и модели — из документации самого OmniRoute
+    # (docs/frameworks/OPENCODE.md): тот же npm-пакет, что у двух пресетов
+    # выше, адрес — панель и API на одном порту 20128, `auto` — модель,
+    # которую советует сам OmniRoute. Ключ `sk_omniroute` — не секрет, а
+    # литерал-заглушка: так пишет собственная команда
+    # `omniroute config opencode` для локального режима, где проверка
+    # ключа выключена и запросы идут с этой машины. Секретов провайдеров
+    # (ключей сервисов) в записи нет: их человек вписывает в панели
+    # OmniRoute, и в opencode.jsonc они не попадают.
+    "omniroute": (
+        "OmniRoute (локальный шлюз, ставится в блоке «Серверы MCP»)",
+        "",
+        '"omniroute": {\n'
+        '      "npm": "@ai-sdk/openai-compatible",\n'
+        '      "name": "OmniRoute",\n'
+        '      "options": {\n'
+        '        "baseURL": "http://localhost:20128/v1",\n'
+        '        "apiKey": "sk_omniroute"\n'
+        "      },\n"
+        '      "models": {\n'
+        '        "auto": {"name": "Автовыбор модели OmniRoute"},\n'
+        '        "claude-sonnet-4-5-thinking": {"name": "Claude Sonnet 4.5 Thinking"},\n'
+        '        "gemini-3-flash": {"name": "Gemini 3 Flash"}\n'
+        "      }\n"
+        "    },",
+    ),
+    # Мост LMArena. Статического блока у него нет намеренно: имена моделей
+    # называет сама арена, и на каждой машине список свой. Блок собирает
+    # lmarena.provider_block() из живого ответа моста и передаётся в
+    # install_providers(blocks=...). Пустой третий элемент здесь — не
+    # забытая строка, а признак: см. PROVIDER_DYNAMIC.
+    "lmarena": (
+        "LMArena (мост к моделям арены; модели берутся живьём из моста)",
+        "",
+        "",
+    ),
 }
+
+#: Пресеты, чей блок собирается из живого ответа моста, а не лежит в коде.
+#: Выдумать список моделей нельзя: у арены он свой и меняется. Такой
+#: пресет ставится только с готовым блоком (install_providers(blocks=...)),
+#: иначе установка отказывает — пустой провайдер в настройках хуже, чем
+#: его отсутствие.
+PROVIDER_DYNAMIC: set[str] = {"lmarena"}
 
 
 def install_providers(
     dest: Path,
     selection: set[str],
     progress=None,
+    blocks: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Дописывает выбранные пресеты в provider. Ключи не трогает и не просит:
-    их человек вводит сам (/connect или переменные окружения)."""
+    их человек вводит сам (/connect или переменные окружения).
+
+    `blocks` — готовые блоки для пресетов из PROVIDER_DYNAMIC: их собирает
+    тот, кто знает живой ответ моста (у LMArena это список моделей арены).
+    Для остальных пресетов блок берётся из PROVIDER_PRESETS, как раньше.
+    """
     messages: list[str] = []
     errors: list[str] = []
 
@@ -713,6 +786,18 @@ def install_providers(
         errors.append(f"Не знаю таких провайдеров: {', '.join(sorted(unknown))}.")
         return messages, errors
     if not selection:
+        return messages, errors
+
+    override = dict(blocks or {})
+    need_block = [name for name in sorted(selection)
+                  if name in PROVIDER_DYNAMIC and not override.get(name)]
+    if need_block:
+        errors.append(
+            "Блок провайдера «" + "», «".join(need_block) + "» собирается из "
+            "живого моста: без его ответа список моделей выдумывать нельзя. "
+            "Запусти мост и повтори — или возьми кнопку «Настроить "
+            "автоматически» у строки моста."
+        )
         return messages, errors
 
     dest.mkdir(parents=True, exist_ok=True)
@@ -733,7 +818,8 @@ def install_providers(
             raise ValueError("opencode.jsonc сломан — правим руками, не автоматом")
         text = ensure_object(text, "provider")
         for name in sorted(selection):
-            _title, _key, block = PROVIDER_PRESETS[name]
+            _title, _key, preset_block = PROVIDER_PRESETS[name]
+            block = override.get(name) or preset_block
             bounds = find_key_object(text, "provider")
             assert bounds is not None
             if not has_entry(text[bounds[0] : bounds[1]], name):
@@ -818,11 +904,20 @@ def install_caps(
     selection: set[str],
     progress=None,
     antiblock_opts: dict[str, bool] | None = None,
+    caveman_level: str = "lite",
+    pxpipe_provider: str = "",
 ) -> tuple[list[str], list[str]]:
     """Ставит выбранное в папку настроек opencode. Возвращает (сообщения, ошибки).
 
     antiblock_opts — галочки раздела «Обход блокировок» (фасад, списки,
     команда, ярлык). Без них обход ставится целиком.
+
+    caveman_level — «лёгкий» (lite) или «полный» (full) уровень правил
+    caveman. Уровня у остальных возможностей нет, поэтому он один на вызов.
+
+    pxpipe_provider — имя провайдера opencode, к которому pxpipe пересылает
+    запросы и у которого берёт модели. Без живого прокси pxpipe ничего не
+    впишет: запись без прокси всё равно не заработает.
     """
     messages: list[str] = []
     errors: list[str] = []
@@ -891,7 +986,7 @@ def install_caps(
                 VOICE_MARK, str(core.program_root() / "tools" / "voice").replace("\\", "/")
             )
             target = dest / "command" / "voice.md"
-            if _place_file(target, body, manifest, say, errors, "Команда /голос"):
+            if place_file(target, body, manifest, say, errors, "Команда /голос"):
                 say("Команда /голос поставлена (папка command)")
 
     # --- агенты
@@ -901,7 +996,7 @@ def install_caps(
         put, skipped = 0, 0
         for src in sorted((core.program_root() / "tools" / "agents").glob("*.md")):
             target = agents_dir / src.name
-            if _place_file(target, src.read_text(encoding="utf-8"), manifest, say, errors,
+            if place_file(target, src.read_text(encoding="utf-8"), manifest, say, errors,
                            f"Агент {src.stem}", quiet=True):
                 put += 1
             else:
@@ -927,18 +1022,96 @@ def install_caps(
         except (OSError, ValueError) as exc:
             errors.append(f"Обход блокировок не поставился: {exc}")
 
+    # --- rtk: свой модуль. Он сам делает живую проверку и при отказе
+    # ничего не пишет — поэтому вызывается до общего «перезапустите».
+    if "rtk" in selection:
+        m_rtk, e_rtk = _rtk_module().install(dest, progress=progress)
+        messages += m_rtk
+        errors += e_rtk
+
+    # --- caveman: правила в AGENTS.md между нашими метками, уровень — выбор
+    # человека. Живой проверки тут не нужно: проверять нечего, кроме самого
+    # файла настроек, а он перед правкой копируется в _previous-version.
+    if "caveman" in selection:
+        m_cav, e_cav = _caveman_module().install(dest, caveman_level, progress=progress)
+        messages += m_cav
+        errors += e_cav
+
+    # --- pxpipe: свой модуль. Он сам проверяет, что прокси жив и запущен
+    # программой именно под выбранный источник, и иначе ничего не пишет.
+    if "pxpipe" in selection:
+        m_px, e_px = _pxpipe_module().install(dest, pxpipe_provider, progress=progress)
+        messages += m_px
+        errors += e_px
+
+    # --- auto-improve: свой модуль. Он проверяет окружение целиком (копия
+    # скрипта, git, requests у Python, ключ судьи) и при нехватке ничего не
+    # записывает: без ключа и git цикл всё равно не пойдёт.
+    if "auto-improve" in selection:
+        m_ai, e_ai = _auto_improve_module().install(dest, progress=progress)
+        messages += m_ai
+        errors += e_ai
+
+    # --- greenlight: свой модуль. Живая проверка — собранный бинарник,
+    # который отвечает на --version. Не собран или Go нет — в настройки
+    # ничего не пишем и говорим об этом прямо.
+    if "greenlight" in selection:
+        m_gl, e_gl = _greenlight_module().install(dest, progress=progress)
+        messages += m_gl
+        errors += e_gl
+
     if (
         "pc" in selection
         or "ncp" in selection
         or "voice" in selection
         or "agents" in selection
         or "antiblock" in selection
+        or "rtk" in selection
+        or "caveman" in selection
+        or "pxpipe" in selection
+        or "auto-improve" in selection
+        or "greenlight" in selection
     ):
         say("Перезапустите opencode: настройки читаются при старте.")
     return messages, errors
 
 
-def _place_file(
+def _rtk_module():
+    """Модуль rtk рядом: отдельной функцией, чтобы не плодить импорты."""
+    import rtk  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return rtk
+
+
+def _caveman_module():
+    """Модуль caveman рядом."""
+    import caveman  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return caveman
+
+
+def _pxpipe_module():
+    """Модуль pxpipe рядом."""
+    import pxpipe  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return pxpipe
+
+
+def _auto_improve_module():
+    """Модуль auto-improve рядом."""
+    import auto_improve  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return auto_improve
+
+
+def _greenlight_module():
+    """Модуль greenlight рядом."""
+    import greenlight  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return greenlight
+
+
+def place_file(
     target: Path,
     body: str,
     manifest: dict,
@@ -1031,6 +1204,39 @@ def remove_caps(
 
     write_manifest(dest, manifest)
 
+    # --- rtk: плагин убирает свой модуль и только свой файл.
+    if "rtk" in selection:
+        m_rtk, e_rtk = _rtk_module().remove(dest)
+        messages += m_rtk
+        errors += e_rtk
+
+    # --- caveman: из AGENTS.md убирается только наш блок между метками.
+    if "caveman" in selection:
+        m_cav, e_cav = _caveman_module().remove(dest)
+        messages += m_cav
+        errors += e_cav
+
+    # --- pxpipe: убирается только наша запись провайдера. Сам прокси это
+    # не останавливает: его гасят кнопкой «Остановить pxpipe».
+    if "pxpipe" in selection:
+        m_px, e_px = _pxpipe_module().remove(dest, progress=progress)
+        messages += m_px
+        errors += e_px
+
+    # --- auto-improve: снимается только наша отметка в манифесте. Ключ и
+    # папка данных остаются на диске — их убирает человек, если захочет.
+    if "auto-improve" in selection:
+        m_ai, e_ai = _auto_improve_module().remove(dest, progress=progress)
+        messages += m_ai
+        errors += e_ai
+
+    # --- greenlight: снимается только отметка. Исходники, собранный
+    # бинарник, журнал и отчёты остаются на диске.
+    if "greenlight" in selection:
+        m_gl, e_gl = _greenlight_module().remove(dest, progress=progress)
+        messages += m_gl
+        errors += e_gl
+
     # --- обход блокировок: убирает свой модуль сам, в запас, не в корзину.
     if "antiblock" in selection:
         try:
@@ -1078,6 +1284,26 @@ def caps_status(dest: Path) -> dict[str, bool]:
 
         if antiblock.antiblock_status(dest):
             status["antiblock"] = True
+    except Exception:
+        pass
+    try:
+        status["rtk"] = bool(_rtk_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["caveman"] = bool(_caveman_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["pxpipe"] = bool(_pxpipe_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["auto-improve"] = bool(_auto_improve_module().installed(dest))
+    except Exception:
+        pass
+    try:
+        status["greenlight"] = bool(_greenlight_module().installed(dest))
     except Exception:
         pass
     _ = manifest

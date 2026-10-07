@@ -16,12 +16,15 @@
         "official_url": "https://nodejs.org/",
         "hand_over": false,
         "publisher_trusted": true,
-        "instructions": "Требуют трое серверов из восьми: windows-admin, excel и obs — все три моста написаны на JavaScript. Ставится одной кнопкой, бесплатно, без аккаунта. Берётся LTS, а не текущая ветка: в каталоге рядом лежит OpenJS.NodeJS версии 26.7.0, то есть скачок через два мажора, а мостам нужен рантайм. На этой машине стоит v24.18.0 в C:\\Program Files\\nodejs, каталог предлагает 24.19.0 — обычное обновление вперёд. Внимание на Windows: npx лежит как npx.ps1, а PowerShell может блокировать запуск .ps1 политикой выполнения; код это обходит, пробуя npx.cmd.",
+        "instructions": "Требуют шестеро серверов из одиннадцати: windows-admin, excel, obs, dbhub, browsers и omniroute — их мосты запускаются через Node.js. Самому dbhub нужен Node.js 22.5 или новее, omniroute просит 22.22.2 в своём package.json, browsers и остальным хватает 18. Ставится одной кнопкой, бесплатно, без аккаунта. Берётся LTS, а не текущая ветка: в каталоге рядом лежит OpenJS.NodeJS версии 26.7.0, то есть скачок через два мажора, а мостам нужен рантайм. На этой машине стоит v24.18.0 в C:\\Program Files\\nodejs, каталог предлагает 24.19.0 — обычное обновление вперёд. Внимание на Windows: npx лежит как npx.ps1, а PowerShell может блокировать запуск .ps1 политикой выполнения; код это обходит, пробуя npx.cmd.",
         "checked": "2026-10-03",
         "required_by": [
           "windows-admin",
           "excel",
-          "obs"
+          "obs",
+          "dbhub",
+          "browsers",
+          "omniroute"
         ]
       },
       {
@@ -753,6 +756,346 @@
       "ready_here_note": "LDPlayer 9 найден, инстанс запущен. Проверено 02.10.2026: 38 инструментов на месте, ld_list видит инстанс, adb_shell и pt_recon отвечают. Два инструмента работают с оговорками: ld_screenshot сообщает об успехе, но файл не создаёт (внутри cp в /storage/sdcard0/Pictures/temp, а такого пути на Android 9 нет) — скриншот бери у android-emulator; у инструментов ADB обязателен параметр name с именем инстанса, иначе мост ищет устройство emulator-5552 и возвращает ошибку",
       "manual_setup": false,
       "verdict": "Порог низкий: LDPlayer стоит, мост лежит в программе, ставить ничего не нужно. Внимание: 22 из 38 инструментов — пентест-арсенал, среди них pt_keylogger, читающий весь ввод внутри эмулятора"
+    },
+    {
+      "id": "dbhub",
+      "name": "DBHub (PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, SQLite)",
+      "source": "https://github.com/bytebase/dbhub",
+      "install": "Мост — лаунчер программы tools/dbapp/launchers/dbhub_bridge_launcher.py. Сам сервер ставить не нужно: npx скачивает пакет @bytebase/dbhub при первом запуске и обновляет его сам. Проверено 07.10.2026: пакет 1.4.0, сервер отвечает, база читается.",
+      "program_install": {
+        "program": "",
+        "method": "none",
+        "winget_id": "",
+        "catalog_version": "",
+        "expected_publisher": "",
+        "expected_signer": "",
+        "signer_checked": "",
+        "needs_admin": false,
+        "needs_admin_verified": false,
+        "official_url": "https://github.com/bytebase/dbhub",
+        "hand_over": false,
+        "publisher_trusted": true,
+        "bridge": "bundled",
+        "instructions": "Ставить нечего: сервер скачивает npx из npm при первом запуске, а программа прогревает кэш заранее, пока человек нажимает «Включить» — первый запуск занимает до минуты, opencode на старт сервера даёт 30 секунд. Подключения и пароли живут рядом с настройками opencode, в программу не пишутся. Лицензия MIT.",
+        "checked": "2026-10-07",
+        "installed_version": "",
+        "version_measured": "",
+        "bridge_checked": false,
+        "known_good": [],
+        "version_note": "Версию выбирает npx сам: @bytebase/dbhub@latest. На 07.10.2026 это 1.4.0; холодная скачка заняла около 17 секунд и 245 МБ — пакет тянет драйверы всех перечисленных баз сразу."
+      },
+      "connection": {
+        "kind": "local",
+        "command": [
+          "{DBAPP_PYTHON}",
+          "{PROGRAM}/tools/dbapp/launchers/dbhub_bridge_launcher.py"
+        ],
+        "warm_up": true,
+        "note": "Пароль базы в конфиг opencode не попадает: он лежит в mcp-dbhub-<имя>-password.txt рядом с настройками, а лаунчер передаёт его серверу как MCP_DBHUB_PASSWORD_<ИМЯ>. Подключения — в mcp-dbhub.toml там же. Запуск: npx -y @bytebase/dbhub@latest --transport stdio --config <файл>. Проверено 07.10.2026: сервер отвечает по протоколу, инструментов два. Прогрев кэша безопасен: с закрытым stdin сервер сам завершается за секунду."
+      },
+      "license": "MIT",
+      "tools_count": 2,
+      "why": "Один сервер вместо отдельного моста на каждую базу: PostgreSQL, MySQL, MariaDB, SQL Server, Oracle и SQLite. Нейросеть видит таблицы и выполняет запросы, оставаясь в границах, которые задал человек: «только чтение» включено по умолчанию, число строк в ответе ограничено.",
+      "auth": "Пароль базы. Программа кладёт его рядом с настройками, в конфиг не пишет; лаунчер передаёт серверу переменной окружения. Без пароля подключение работает как обычно — файл нужен, только если пароль есть в строке подключения.",
+      "opencode": "После включения нужен перезапуск opencode",
+      "requires": [
+        {
+          "what": "Node.js 22.5+",
+          "check": "node",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "min_version": 22,
+          "note": "в пакете dbhub записано engines.node ≥ 22.5.0. Проверка видит только старший номер, поэтому 22.0 она пропустит — точную границу 22.5 стерегут сами npm и npx"
+        },
+        {
+          "what": "npx",
+          "check": "npx",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "note": "сервер запускается через npx, отдельно ставить нечего"
+        },
+        {
+          "what": "подключение к базе добавлено",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "файл mcp-dbhub.toml рядом с настройками. Без подключения живая проверка скажет об этом прямо и в настройки ничего не впишет"
+        }
+      ],
+      "ready_here": false,
+      "ready_here_note": "07.10.2026 живая проверка пройдена на Linux (песочница), база SQLite: DBHub 1.4.0 скачался через npx, протокол 2025-06-18 отвечает, список таблиц получен, INSERT отклонён режимом «только чтение». Windows и настоящая чужая база не проверялись — поэтому готовность выключена, а не «работает».",
+      "verdict": "Работает без установки: сервер скачивает npx, подключения и пароли живут рядом с настройками. Кнопка «Включить» сначала проверяет соединение и только потом вписывает сервер в opencode"
+    },
+    {
+      "id": "browsers",
+      "name": "Браузеры (Chrome, Edge, Яндекс.Браузер, Firefox)",
+      "source": "https://github.com/microsoft/playwright-mcp",
+      "install": "Мост — лаунчер программы tools/dbapp/launchers/browsers_bridge_launcher.py. Сам сервер ставить не нужно: npx скачивает пакет @playwright/mcp при первом запуске и обновляет его сам. Что выбрано — браузер, профиль, окно — лежит в mcp-browsers.json рядом с настройками opencode. Проверено 07.10.2026: сервер отвечает по протоколу, инструментов 25.",
+      "program_install": {
+        "program": "",
+        "method": "none",
+        "winget_id": "",
+        "catalog_version": "",
+        "expected_publisher": "",
+        "expected_signer": "",
+        "signer_checked": "",
+        "needs_admin": false,
+        "needs_admin_verified": false,
+        "official_url": "https://github.com/microsoft/playwright-mcp",
+        "hand_over": false,
+        "publisher_trusted": true,
+        "bridge": "bundled",
+        "instructions": "Браузеры программа не ставит: Chrome, Edge и Яндекс.Браузер человек ставит сам. Chrome и Edge Playwright берёт по каналу (--browser chrome, --browser msedge) и ставить их не умеет. Скачивается по галочке только своя сборка Firefox для Playwright (около 90 МБ): к обычному Firefox подключиться нельзя, Playwright водит лишь свою сборку.",
+        "checked": "2026-10-07",
+        "installed_version": "",
+        "version_measured": "",
+        "bridge_checked": false,
+        "known_good": [],
+        "version_note": "Версию выбирает npx сам: @playwright/mcp@latest. На 07.10.2026 это 0.0.83 (внутри playwright 1.64.0-alpha). В самом пакете записано engines.node ≥ 18."
+      },
+      "connection": {
+        "kind": "local",
+        "command": [
+          "{DBAPP_PYTHON}",
+          "{PROGRAM}/tools/dbapp/launchers/browsers_bridge_launcher.py"
+        ],
+        "warm_up": true,
+        "note": "Браузер, профиль и режим окна в конфиг opencode не попадают: они лежат в mcp-browsers.json рядом с настройками, а лаунчер собирает из них аргументы. Запуск: npx -y @playwright/mcp@latest --browser chrome|msedge|firefox либо --executable-path <путь> (Яндекс.Браузер), --user-data-dir <профиль> либо --isolated, при желании --headless. Режим «мои сессии» — --extension: только Chrome и Edge и только с расширением Playwright. Проверено 07.10.2026: протокол 2025-06-18, инструментов 25."
+      },
+      "license": "Apache-2.0",
+      "tools_count": 25,
+      "why": "Нейросеть открывает страницы, читает их и нажимает кнопки в отдельном браузере, а не только в своей headless-копии. По умолчанию у неё свой профиль: личные вкладки и сессии не тронуты, а режим «мои сессии» включается только явным выбором. Chrome, Edge и Яндекс.Браузер — обычный Chromium, Firefox — своя сборка Playwright.",
+      "auth": "Паролей нет. Профиль нейросети лежит в cache/browsers рядом с настройками и в конфиг opencode не пишется. Режим «мои сессии» требует расширения Playwright в своём Chrome или Edge — расширение человек ставит сам, программа его не ставит.",
+      "opencode": "После включения нужен перезапуск opencode",
+      "requires": [
+        {
+          "what": "Node.js 18+",
+          "check": "node",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "min_version": 18,
+          "note": "в пакете @playwright/mcp записано engines.node ≥ 18. Проверка видит только старший номер: 18.0 она пропустит, а точную границу стерегут сами npm и npx"
+        },
+        {
+          "what": "npx",
+          "check": "npx",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "note": "сервер запускается через npx, отдельно ставить нечего"
+        },
+        {
+          "what": "браузер выбран",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "файл mcp-browsers.json рядом с настройками. Пока выбора нет, берётся Chrome — так написано в программе, а не в пакете"
+        },
+        {
+          "what": "браузер установлен",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "Chrome и Edge берутся по каналу, Яндекс.Браузер — по пути к browser.exe. Проверяет это живая проверка: она открывает страницу, а не смотрит на файлы"
+        }
+      ],
+      "setup_steps": [
+        "Поставь Node.js 18+ — без него npx ничего не скачает. Он же нужен остальным мостам.",
+        "Выдели строку «Браузеры» и нажми «Выбрать браузер»: Chrome, Edge, Яндекс.Браузер или Firefox. Для Яндекса укажи путь к browser.exe.",
+        "Выбери профиль: отдельный (по умолчанию), без сохранения на диске или «мои сессии» через расширение Playwright.",
+        "Для Firefox поставь галочку «скачать сборку Playwright»: обычный Firefox не подойдёт, Playwright водит только свою сборку, около 90 МБ.",
+        "Нажми «Проверить браузер»: программа откроет страницу, прочитает заголовок и сохранит снимок. Пока проверка не прошла, сервер не включается.",
+        "Нажми «Настроить автоматически»: после удачной проверки сервер впишется в настройки opencode.",
+        "Перезапусти opencode — без перезапуска он нового сервера не увидит."
+      ],
+      "ready_here": false,
+      "ready_here_note": "07.10.2026 в песочнице проверена вся цепочка, кроме самого браузера: лаунчер запускает npx, настоящий @playwright/mcp 0.0.83 отвечает по протоколу 2025-06-18 и отдаёт 25 инструментов, а вызов browser_navigate честно отказывает: «Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome». Браузера в песочнице нет и поставить его нечем — поэтому готовность выключена, а не «работает».",
+      "verdict": "Работает без установки сервера: пакет скачивает npx. Chrome и Edge запускаются как есть, Яндекс.Браузер — по пути, Firefox требует разовой сборки Playwright. По умолчанию у нейросети отдельный профиль, а не ваши сессии",
+      "manual_setup": false
+    },
+    {
+      "id": "omniroute",
+      "name": "OmniRoute (шлюз к провайдерам моделей, 358 провайдеров)",
+      "source": "https://github.com/diegosouzapw/OmniRoute",
+      "install": "Мост — лаунчер программы tools/dbapp/launchers/omniroute_bridge_launcher.py, сам OmniRoute ставится кнопкой «Развернуть» в свою папку tools/thirdparty/omniroute командой npm install omniroute из README. Системный Node.js нужен, служебные папки пакетов не трогаются. Проверено 07.10.2026: установлен omniroute 3.8.51, сервер отвечает на GET /api/health, MCP-сервер отдаёт 110 инструментов.",
+      "program_install": {
+        "program": "",
+        "method": "none",
+        "winget_id": "",
+        "catalog_version": "",
+        "expected_publisher": "",
+        "expected_signer": "",
+        "signer_checked": "",
+        "needs_admin": false,
+        "needs_admin_verified": false,
+        "official_url": "https://github.com/diegosouzapw/OmniRoute",
+        "hand_over": false,
+        "publisher_trusted": true,
+        "bridge": "bundled",
+        "instructions": "Отдельно ставить нечего: программу OmniRoute ставит сама программа управления базой, в свою папку моста, командой npm install omniroute — так советует README автора. Глобальная установка (npm install -g) не делается: она писала бы в служебные папки Node.js. Нужен только Node.js из README (22.22.2+ или 24–26): без него npm и запуск не работают.",
+        "checked": "2026-10-07",
+        "installed_version": "3.8.51",
+        "version_measured": "2026-10-07",
+        "bridge_checked": true,
+        "known_good": [
+          "3.8.51"
+        ],
+        "version_note": "07.10.2026 поставлена и проверена 3.8.51 — последняя в npm на этот день. Ветка репозитория уже была release/v3.8.52, то есть версии npm и репозитория расходятся на патч; команда ставит последнюю из npm."
+      },
+      "connection": {
+        "kind": "local",
+        "command": [
+          "{DBAPP_PYTHON}",
+          "{PROGRAM}/tools/dbapp/launchers/omniroute_bridge_launcher.py"
+        ],
+        "warm_up": false,
+        "note": "Запуск MCP-сервера: node node_modules/omniroute/bin/omniroute.mjs --mcp (stdio, 110 инструментов). Лаунчер ставит DATA_DIR в папку omniroute-data рядом с настройками opencode, PORT=20128 и OMNIROUTE_SERVER_HOST=127.0.0.1 — имена из .env самого OmniRoute. Секретов в конфиге нет: ключи провайдеров человек вписывает в панели, и в opencode.jsonc они не попадают. Проверено 07.10.2026: протокол 2025-06-18, инструментов 110."
+      },
+      "license": "MIT",
+      "tools_count": 110,
+      "why": "Один шлюз вместо десятка подключений: OmniRoute собирает провайдеров моделей за одним адресом, сам выбирает модель, считает расходы и переживает отказ провайдера. Бесплатные провайдеры без ключа программа подключает сама, поэтому нейросеть получает модели, за которые не надо платить и не надо ничего настраивать руками.",
+      "auth": "Ключей у моста нет. Бесплатные провайдеры без ключа (категория noauth) подключаются сами. Ключи платных провайдеров человек вписывает в панели OmniRoute; они лежат в папке omniroute-data рядом с настройками opencode и закрыты правилом в .gitignore. В opencode.jsonc и в реестр ключи не пишутся: в записи провайдера стоит литерал-заглушка sk_omniroute из документации OmniRoute — это не секрет, а признак локального режима.",
+      "opencode": "После включения нужен перезапуск opencode",
+      "requires": [
+        {
+          "what": "Node.js 22.22.2+",
+          "check": "node",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "min_version": 22,
+          "note": "в пакете omniroute записано engines.node >= 22.22.2 < 23 || >= 24 < 27 — версия из его package.json. Проверка видит только старший номер: 22.0 она пропустит, точную границу стерегут npm и сам запуск"
+        },
+        {
+          "what": "npm",
+          "check": "npm",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "note": "ставится вместе с Node.js; программа ставит OmniRoute этой командой в свою папку"
+        },
+        {
+          "what": "программа развёрнута",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "папка tools/thirdparty/omniroute/node_modules/omniroute — её создаёт кнопка «Развернуть». Проверяет это живая проверка: запрос к /api/health, а не наличие файлов"
+        },
+        {
+          "what": "сервер запущен",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "кнопка «Запустить» поднимает omniroute serve --daemon и ждёт ответа API. Без запущенного сервера MCP-инструменты отвечают «fetch failed» — мост виден, а толку нет"
+        }
+      ],
+      "setup_steps": [
+        "Поставь Node.js из README автора (22.22.2+ или 24–26) — без него ни npm, ни запуск OmniRoute не работают.",
+        "Выдели строку «OmniRoute» и нажми «Развернуть»: программа поставит пакет omniroute из npm в свою папку моста. Это сотни мегабайт и несколько минут.",
+        "Нажми «Запустить»: поднимется локальный сервер, панель и API на http://127.0.0.1:20128. Первый запуск создаёт базу в папке omniroute-data рядом с настройками opencode.",
+        "Нажми «Показать статус»: должно быть написано, что API отвечает и сколько провайдеров подключено. Молчит — смотри журнал и нажми «Запустить» ещё раз.",
+        "Нажми «Настроить автоматически»: программа подключит бесплатных провайдеров без ключа, впишет провайдера OmniRoute в opencode.jsonc и включит MCP-сервер.",
+        "Платные и бесплатные-с-ключом провайдеры вписываются человеком в панели OmniRoute (вкладка Providers): ключей сервисов у программы нет, и выдумывать их она не станет.",
+        "Перезапусти opencode — без перезапуска он нового сервера не увидит."
+      ],
+      "ready_here": true,
+      "ready_here_note": "07.10.2026 в песочнице проверено целиком на omniroute 3.8.51: npm install в папку моста, omniroute serve --daemon, живой запрос GET /api/health — «ok», CLI health называет версию 3.8.51, MCP-сервер через наш лаунчер отвечает по протоколу 2025-06-18 и отдаёт 110 инструментов, бесплатный провайдер без ключа (opencode, категория noauth) подключился командой providers add. Не проверено на живом аккаунте: ответ модели через провайдера (в песочнице нет ни одного доступного провайдера) и вход в панель — это делает человек на своей машине.",
+      "verdict": "Работает: программа сама ставит OmniRoute в свою папку, поднимает сервер, проверяет его настоящим запросом и подключает бесплатных провайдеров без ключа. Ключи платных провайдеров — в панели OmniRoute, не в настройках opencode",
+      "manual_setup": false
+    },
+    {
+      "id": "lmarena",
+      "name": "LMArena (мост к моделям арены; стелс-модели форк не отдаёт)",
+      "source": "https://github.com/CloudWaddie/LMArenaBridge",
+      "install": "Мост — лаунчер программы tools/dbapp/launchers/lmarena_bridge_launcher.py, сам форк LMArenaBridge лежит кодом в tools/thirdparty/lmarena, а его зависимости ставит кнопка «Развернуть» в своё окружение tools/thirdparty/lmarena/.venv командой из README форка: pip install -r requirements.txt. Порядок установки, команда запуска (python -m src.main) и адрес API (http://localhost:8000/api/v1) взяты из README форка — на ветке main он удалён коммитом 5e524b1 от 29.08.2026, поэтому сверялись по последнему коммиту с README (97a547d). Проверено 07.10.2026: окружение ставится, мост поднимается, GET /api/v1/health отвечает, MCP-слой лаунчера отдаёт три инструмента. Что именно скопировано в папку моста и почему — в tools/thirdparty/lmarena/README.md.",
+      "program_install": {
+        "program": "",
+        "method": "none",
+        "winget_id": "",
+        "catalog_version": "",
+        "expected_publisher": "",
+        "expected_signer": "",
+        "signer_checked": "",
+        "needs_admin": false,
+        "needs_admin_verified": false,
+        "official_url": "https://github.com/CloudWaddie/LMArenaBridge",
+        "hand_over": false,
+        "publisher_trusted": true,
+        "bridge": "bundled",
+        "instructions": "Отдельно ставить нечего: код форка лежит в самой программе (tools/thirdparty/lmarena), а зависимости — fastapi, uvicorn, camoufox, playwright, httpx, cloudscraper — ставятся кнопкой «Развернуть» в собственное окружение этого моста. Нужен Python 3.10+ (у программы он уже есть: окружение создаётся её же Python) и сеть на шаге установки. Ни прав администратора, ни winget, ни чужих папок пакетов тут не нужно.",
+        "checked": "2026-10-07",
+        "installed_version": "1.0.0",
+        "version_measured": "2026-10-07",
+        "bridge_checked": false,
+        "known_good": [],
+        "version_note": "Версии у форка 1.0.0 в pyproject.toml; релизов на GitHub нет вовсе, сверялись по коммиту e9655ea (29.08.2026). Мост на этой версии развёрнут и отвечает, но живой ответ модели получить не удалось: арена из песочницы недоступна, а токена у программы нет. Поэтому bridge_checked=false — зелёной отметки без живой проверки не ставим."
+      },
+      "connection": {
+        "kind": "local",
+        "command": [
+          "{DBAPP_PYTHON}",
+          "{PROGRAM}/tools/dbapp/launchers/lmarena_bridge_launcher.py"
+        ],
+        "warm_up": false,
+        "note": "У форка нет MCP: он отдаёт OpenAI-совместимый HTTP API. Наш лаунчер — тонкий stdio-сервер MCP поверх этого API, три инструмента: lmarena_status, lmarena_models, lmarena_chat. Если мост не поднят, лаунчер поднимает его сам тем же кодом, что кнопка «Запустить». Секретов в команде нет: токен арены лежит файлом рядом с настройками и в config.json моста, запросы к мосту идут без ключа — так написано в README форка. Проверено 07.10.2026: протокол 2025-06-18, три инструмента."
+      },
+      "license": "MIT",
+      "tools_count": 3,
+      "why": "Бесплатный доступ нейросети к моделям сервиса Arena: мост отдаёт их OpenAI-совместимым API, а программа вписывает их провайдером в opencode. Список моделей берётся у живого моста, а не из кода — арена меняет его сама. Стелс-модели этот форк не отдаёт: список их не показывает, а запрос к ним отвечает отказом 403.",
+      "auth": "Токен один — кука arena-auth-prod-v1 с сайта арены; человек достаёт её в своём браузере (README форка: отправить сообщение, F12 → Application → Cookies). Программа хранит её файлом mcp-lmarena-token.txt рядом с настройками opencode (в .gitignore) и переносит в config.json моста. В opencode.jsonc, в реестр, в журнал и в сообщения окна токен не попадает. API-ключ моста программе не нужен: при пустом ключе мост берёт свой первый ключ из config.json, а подставленное «любое значение» получило бы 401 — проверено на живом мосте.",
+      "opencode": "После включения нужен перезапуск opencode",
+      "requires": [
+        {
+          "what": "Python 3.10+",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "окружение моста создаётся Python самой программы (3.11), поэтому отдельно ставить Python не надо. В pyproject.toml форка записано requires-python >= 3.10 — на 3.9 мост не пойдёт."
+        },
+        {
+          "what": "мост развёрнут",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "папка tools/thirdparty/lmarena/.venv — её создаёт кнопка «Развернуть». Проверяет это живая проверка API, а не наличие файлов."
+        },
+        {
+          "what": "токен арены",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "кука arena-auth-prod-v1 в файле mcp-lmarena-token.txt рядом с настройками — её кладёт кнопка «Обновить токен». Без токена мост работает, но список моделей пуст, и живая проверка честно откажет."
+        },
+        {
+          "what": "сервер запущен",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "кнопка «Запустить» поднимает мост на http://127.0.0.1:8000 и ждёт ответа API. MCP-инструменты поднимают его сами, если он не запущен."
+        }
+      ],
+      "setup_steps": [
+        "Прочитай предупреждения: мост работает через веб-сервис Arena, а не через официальный API, запросы уходят на публичную площадку, приватный код и секреты через него отправлять нельзя.",
+        "Выдели строку «LMArena» и нажми «Развернуть»: программа поставит окружение моста и его зависимости в свою папку. Нужна сеть, это десятки мегабайт.",
+        "Нажми «Обновить токен» и вставь куку arena-auth-prod-v1 с сайта арены (F12 → Application → Cookies; значение начинается с base64-).",
+        "Нажми «Запустить»: мост поднимется на http://127.0.0.1:8000, первый запуск тянет список моделей с арены.",
+        "Нажми «Показать статус»: должно быть написано, что мост отвечает, токен есть и сколько моделей он знает. Моделей нет — токен не подошёл, обнови его.",
+        "Нажми «Настроить автоматически»: программа спросит у модели настоящий ответ, и только после этого впишет провайдера с моделями арены и MCP-сервер в настройки opencode.",
+        "Перезапусти opencode — без перезапуска он нового сервера не увидит."
+      ],
+      "ready_here": false,
+      "ready_here_note": "07.10.2026 в песочнице проверено: окружение моста ставится по requirements.txt, мост поднимается (python -m src.main), GET /api/v1/health отвечает «degraded» (сервер жив, токена и моделей нет), GET /api/v1/models отдаёт пустой список, POST /api/v1/chat/completions на несуществующую модель отвечает понятным 404, наш MCP-лаунчер отвечает по протоколу 2025-06-18 тремя инструментами и честно отказывает без токена. Чего проверить не удалось: живой ответ модели — из песочницы нет доступа к арене, а токена у программы нет; панель моста; поведение на Windows.",
+      "verdict": "Мост поднимается и отвечает, модели становятся провайдером opencode; живой ответ модели на этой машине не проверен — зелёной отметки нет.",
+      "manual_setup": false
     }
   ],
   "excluded": [

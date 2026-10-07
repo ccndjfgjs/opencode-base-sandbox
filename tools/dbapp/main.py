@@ -20,11 +20,22 @@ if __package__ in (None, ""):
     import opencode_caps  # type: ignore[import-not-found]
     import android_studio  # type: ignore[import-not-found]
     import bridges  # type: ignore[import-not-found]
+    import browsers  # type: ignore[import-not-found]
+    import caveman  # type: ignore[import-not-found]
+    import dbhub  # type: ignore[import-not-found]
+    import lmarena  # type: ignore[import-not-found]
+    import auto_improve  # type: ignore[import-not-found]
+    import greenlight  # type: ignore[import-not-found]
+    import omniroute  # type: ignore[import-not-found]
+    import pxpipe  # type: ignore[import-not-found]
+    import rtk  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
-    from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   program_cards, winget_install)
+    from . import (core, ui, mcp_registry, opencode_caps, android_studio,
+                   auto_improve, bridges, browsers, caveman, dbhub, greenlight,
+                   lmarena, omniroute, program_cards, pxpipe, rtk,
+                   winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -36,6 +47,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -2270,6 +2282,885 @@ class ObsPasswordDialog(QDialog):
         return self._path
 
 
+class DbhubConnectionDialog(QDialog):
+    """Окно подключения к базе для DBHub.
+
+    Спрашиваем только то, без чего мост нечего запускать: как звать
+    подключение, к какой базе и по какой строке. Отдельного поля под
+    пароль нет намеренно: пароль берётся из строки подключения и уезжает
+    в свой файл, а в конфиг попадает ссылка на переменную. Так секрет не
+    остаётся в файле, который открыт и переносится между компьютерами.
+
+    Файл подключений ведёт программа: он лежит рядом с настройками
+    opencode и в репозиторий не попадает. Дописать второй источник можно
+    тем же окном — список уже добавленных виден наверху.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Подключение к базе для DBHub")
+        self.setMinimumWidth(640)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "DBHub умеет PostgreSQL, MySQL, MariaDB, SQL Server, Oracle и "
+            "SQLite. Строку подключения возьми у себя: у каждой базы она "
+            "своя. Пароль, если он есть в строке, программа вынет и "
+            "положит отдельным файлом рядом с настройками — в конфиге "
+            "останется только ссылка на него.",
+            wrap=True,
+        ))
+
+        old = dbhub.read_sources(self.dest)
+        if old:
+            names = ", ".join(f"{s.id} ({s.db_type})" for s in old)
+            box.addWidget(ui.label(f"Уже добавлено: {names}", kind="dim", wrap=True))
+
+        form = QVBoxLayout()
+        form.setSpacing(4)
+
+        row_name = QHBoxLayout()
+        row_name.addWidget(ui.label("Имя подключения:", kind="title"))
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("латиницей, без пробелов: sklad, main-db")
+        row_name.addWidget(self.name, 1)
+        form.addLayout(row_name)
+
+        row_type = QHBoxLayout()
+        row_type.addWidget(ui.label("Тип базы:", kind="title"))
+        self.db_type = QComboBox()
+        for key, title, _schemes in dbhub.DB_TYPES:
+            self.db_type.addItem(title, key)
+        self.db_type.currentIndexChanged.connect(self._refresh_example)
+        row_type.addWidget(self.db_type, 1)
+        form.addLayout(row_type)
+
+        row_dsn = QHBoxLayout()
+        row_dsn.addWidget(ui.label("Строка подключения:", kind="title"))
+        self.dsn = QLineEdit()
+        row_dsn.addWidget(self.dsn, 1)
+        form.addLayout(row_dsn)
+        box.addLayout(form)
+
+        row_limits = QHBoxLayout()
+        self.readonly = QCheckBox("Только чтение")
+        self.readonly.setChecked(True)
+        self.readonly.setToolTip(
+            "Запросы на изменение данных будут отклонены. Снять галочку — "
+            "значит разрешить серверу менять базу"
+        )
+        row_limits.addWidget(self.readonly)
+        row_limits.addSpacing(16)
+        row_limits.addWidget(ui.label("Строк в ответе:", kind="title"))
+        self.max_rows = QSpinBox()
+        self.max_rows.setRange(10, 100000)
+        self.max_rows.setValue(dbhub.DEFAULT_MAX_ROWS)
+        self.max_rows.setSingleStep(100)
+        self.max_rows.setToolTip(
+            "Сколько строк сервер отдаст в одном ответе. Ограничение "
+            "касается execute_sql: без него один неосторожный запрос "
+            "вернёт таблицу целиком"
+        )
+        row_limits.addWidget(self.max_rows)
+        row_limits.addStretch(1)
+        box.addLayout(row_limits)
+
+        self.example = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.example)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Записать")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        self._refresh_example()
+
+    def _current_type(self) -> str:
+        return str(self.db_type.currentData() or "")
+
+    def _refresh_example(self) -> None:
+        key = self._current_type()
+        example = dbhub.DSN_EXAMPLES.get(key, "")
+        self.dsn.setPlaceholderText(example)
+        self.example.setText(
+            f"Пример для этой базы: {example}. Такой адрес — образец формы, "
+            "а не настоящий: подставь свой хост, базу и пользователя."
+            if example else ""
+        )
+
+    def _save(self) -> None:
+        messages, errors = dbhub.add_source(
+            self.dest, self.name.text(), self._current_type(),
+            self.dsn.text(), self.readonly.isChecked(), self.max_rows.value(),
+        )
+        if errors:
+            # Окно не закрывается: человек должен видеть, что именно не так,
+            # и поправить хотя бы то, что поправимо с клавиатуры.
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
+class BrowserChoiceDialog(QDialog):
+    """Окно выбора браузера для моста Playwright MCP.
+
+    Спрашиваем то, без чего мост не запустить: каким браузером водит
+    нейросеть, куда класть его профиль и показывать ли окно. Меню браузеров
+    у Playwright своё и не совпадает с тем, что стоит у человека: Chrome и
+    Edge берутся по каналу, Яндекс.Браузер — только по пути к browser.exe,
+    а Firefox — не тот, что стоит у человека, а своя сборка Playwright.
+    Про последнее окно говорит прямо, а не ставит галочку «Firefox»,
+    за которой ничего нет.
+
+    Выбор ложится файлом рядом с настройками opencode. В самих настройках
+    остаётся только команда лаунчера: смена браузера их не переписывает.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Браузер для нейросети")
+        self.setMinimumWidth(700)
+        self.choice = browsers.read_choice(self.dest)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Нейросеть будет открывать страницы в выбранном браузере. По "
+            "умолчанию у неё свой профиль, поэтому твои вкладки и входы в "
+            "своих аккаунтах она не увидит. Режим «мои сессии» — только "
+            "явным выбором и только с расширением Playwright.",
+            wrap=True,
+        ))
+
+        row_browser = QHBoxLayout()
+        row_browser.addWidget(ui.label("Браузер:", kind="title"))
+        self.browser_box = QComboBox()
+        for item in browsers.BROWSERS:
+            self.browser_box.addItem(item.title, item.key)
+        index = self.browser_box.findData(self.choice.browser)
+        if index >= 0:
+            self.browser_box.setCurrentIndex(index)
+        self.browser_box.currentIndexChanged.connect(self._refresh)
+        row_browser.addWidget(self.browser_box, 1)
+        box.addLayout(row_browser)
+
+        self.browser_hint = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.browser_hint)
+
+        row_path = QHBoxLayout()
+        row_path.addWidget(ui.label("Путь к browser.exe:", kind="title"))
+        self.path = QLineEdit(self.choice.executable)
+        self.path.setPlaceholderText(
+            "для Яндекс.Браузера: ...\\Yandex\\YandexBrowser\\Application\\browser.exe"
+        )
+        self.path.textChanged.connect(self._refresh)
+        row_path.addWidget(self.path, 1)
+        self.btn_browse = QPushButton("Обзор…")
+        self.btn_browse.clicked.connect(self._browse)
+        row_path.addWidget(self.btn_browse)
+        box.addLayout(row_path)
+
+        row_profile = QHBoxLayout()
+        row_profile.addWidget(ui.label("Профиль:", kind="title"))
+        self.profile_box = QComboBox()
+        for key, title in browsers.PROFILE_MODES:
+            self.profile_box.addItem(title, key)
+        index = self.profile_box.findData(self.choice.profile)
+        if index >= 0:
+            self.profile_box.setCurrentIndex(index)
+        self.profile_box.currentIndexChanged.connect(self._refresh)
+        row_profile.addWidget(self.profile_box, 1)
+        box.addLayout(row_profile)
+
+        self.headless = QCheckBox("Скрыть окно браузера — работать без него")
+        self.headless.setChecked(self.choice.headless)
+        self.headless.setToolTip(
+            "С окном видно, что делает нейросеть, и можно вмешаться. Без "
+            "окна работа идёт незаметно"
+        )
+        self.headless.stateChanged.connect(self._refresh)
+        box.addWidget(self.headless)
+
+        self.download = QCheckBox(
+            "Скачать сборку Firefox для Playwright, около 90 МБ"
+        )
+        self.download.setChecked(self.choice.download_firefox)
+        self.download.setToolTip(
+            "Твой Firefox не подойдёт: Playwright водит только свою сборку. "
+            "Скачивание идёт командой npx playwright install firefox"
+        )
+        box.addWidget(self.download)
+
+        self.command_hint = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.command_hint)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Записать")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        self._refresh()
+
+    def _current_key(self) -> str:
+        return str(self.browser_box.currentData() or "chrome")
+
+    def _current_profile(self) -> str:
+        return str(self.profile_box.currentData() or "separate")
+
+    def _build_choice(self) -> browsers.Choice:
+        return browsers.Choice(
+            browser=self._current_key(),
+            executable=self.path.text().strip(),
+            profile=self._current_profile(),
+            headless=self.headless.isChecked(),
+            download_firefox=self.download.isChecked(),
+            checked=self.choice.checked,
+        )
+
+    def _browse(self) -> None:
+        start = self.path.text().strip()
+        if not start:
+            found = browsers.installed_path(self._current_key())
+            start = str(found) if found else ""
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Где лежит browser.exe", start,
+            "Программы (*.exe);;Все файлы (*)",
+        )
+        if chosen:
+            self.path.setText(chosen)
+
+    def _refresh(self) -> None:
+        key = self._current_key()
+        item = browsers.browser(key)
+        profile = self._current_profile()
+        self.browser_hint.setText(
+            item.note + " " + browsers.hint(key, self._build_choice())
+        )
+        # Путь нужен только там, где браузер запускается по файлу. У
+        # остальных он бы только путал: Playwright их и так найдёт.
+        needs_path = item.kind == "path"
+        self.path.setEnabled(needs_path)
+        self.btn_browse.setEnabled(needs_path)
+        self.download.setEnabled(
+            item.kind == "playwright" and browsers.playwright_firefox_dir() is None
+        )
+        self.headless.setEnabled(profile != "sessions")
+        self.command_hint.setText(
+            "Запуск: " + " ".join(browsers.command(self.dest, self._build_choice()))
+            + ". Профиль: "
+            + str(browsers.profile_dir(self.dest, key))
+        )
+
+    def _save(self) -> None:
+        messages, errors = browsers.write_choice(self.dest, self._build_choice())
+        if errors:
+            # Окно не закрывается: человек должен видеть, что именно не так,
+            # и поправить это здесь же.
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
+class LmarenaWarningDialog(QDialog):
+    """Предупреждения моста LMArena — до первого запуска.
+
+    Мост работает через веб-сервис арены, а не через её официальный API,
+    и запросы уходят на публичную площадку. Поэтому мост выключен по
+    умолчанию, а это окно показывается каждый раз перед тем, как его
+    поднять или вписать в настройки: согласие должно быть осознанным, а
+    не «я когда-то нажал галочку». Текст предупреждений держится в
+    lmarena.WARNINGS — там же, откуда его берут скилл и самопроверка.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Мост LMArena: что важно знать")
+        self.setMinimumWidth(680)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Мост LMArena — программа к сервису Arena (arena.ai). Он "
+            "включается только по явному согласию и по умолчанию выключен. "
+            "Перед первым запуском прочитай, на что идёшь:",
+            wrap=True,
+        ))
+        for number, warning in enumerate(lmarena.WARNINGS, start=1):
+            box.addWidget(ui.label(f"{number}. {warning}", wrap=True))
+
+        box.addWidget(ui.label(
+            "Нажми «Согласен» — и дальше программа сделает ровно то, что "
+            "написано на кнопке. «Отмена» не делает ничего.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Согласен")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+
+class PxpipeWarningDialog(QDialog):
+    """Предупреждение pxpipe — до запуска прокси и до галочки.
+
+    pxpipe переписывает часть запроса картинками, и это сжатие с потерями:
+    по тестам автора часть моделей плохо различает символы, а точные
+    строки, ключи и код — как раз из символов. Галочка по умолчанию снята,
+    а это окно показывается и перед её включением, и перед каждым запуском
+    прокси: согласие должно быть осознанным, а не «я когда-то нажал
+    галочку». Текст держится в pxpipe.WARNING — там же, откуда его берут
+    скилл и самопроверка.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("pxpipe: что важно знать")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "pxpipe — сторонний прокси автора teamchong (лицензия MIT). "
+            "Запросы opencode пойдут через него, и часть запроса он "
+            "превратит в картинки. Включается только по явному согласию "
+            "и по умолчанию выключен. Прочитай, на что идёшь:",
+            wrap=True,
+        ))
+        # Абзацы текста автора свёрнуты в строки: переносы в константе стоят
+        # для читаемости кода, а не для окна — окно переносит само.
+        for _part in pxpipe.WARNING.split("\n\n"):
+            _text = " ".join(line.strip() for line in _part.splitlines()
+                             if line.strip())
+            if _text:
+                box.addWidget(ui.label(_text, wrap=True))
+        box.addWidget(ui.label(
+            "Нажми «Согласен» — и дальше программа сделает ровно то, что "
+            "написано на кнопке. «Отмена» не делает ничего.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Согласен")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+
+class AutoImproveKeyDialog(QDialog):
+    """Ключ модели-судьи Gemini — файлом рядом с настройками.
+
+    Ключ берётся человеком на aistudio.google.com/apikey (ссылка — из
+    README автора auto-improve). Программа его только сохраняет: файлом
+    `auto-improve-key.txt` рядом с настройками opencode, откуда он уезжает
+    в окружение процесса при запуске цикла. В команды, настройки opencode
+    и журналы ключ не попадает — поэтому же он показывается точками.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Ключ модели-судьи для auto-improve")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "auto-improve оценивает правки отдельной моделью-судьёй Google "
+            "Gemini. Ключ к ней берётся на aistudio.google.com/apikey — "
+            "у автора в README указана именно эта страница; ключ бесплатный, "
+            "но у него есть лимиты на число запросов.",
+            wrap=True,
+        ))
+        box.addWidget(ui.label(
+            "Ключ ляжет файлом " + auto_improve.KEY_NAME + " рядом с "
+            "настройками opencode и в репозиторий не попадёт. В команды и "
+            "журнал он тоже не записывается: программа кладёт его в "
+            "окружение процесса. Проверкой ключа будет первый запуск "
+            "цикла — в интернет за этим программа не ходит.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        self.key = QLineEdit()
+        self.key.setPlaceholderText("ключ Gemini (начинается с AIza…)")
+        self.key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key.setToolTip(
+            "Значение ключа. Показывается точками: это секрет, и он должен "
+            "попадать в журнал как можно реже"
+        )
+        self.show_key = QCheckBox("Показать ключ")
+        self.show_key.toggled.connect(
+            lambda on: self.key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        box.addWidget(self.key)
+        box.addWidget(self.show_key)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Сохранить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _save(self) -> None:
+        messages, errors = auto_improve.save_key(self.dest, self.key.text())
+        if errors:
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
+class AutoImproveDialog(QDialog):
+    """Что именно улучшать — до запуска цикла.
+
+    Здесь выбирается файл, рубрика (свои рубрики автора, свой файл или
+    «без рубрики» с целью одной строкой), тег запуска и ограничения цикла.
+    Внизу прямым текстом сказано главное: скрипт автора сам делает
+    `git add -A`, создаёт ветку `improve/<тег>` и коммитит в неё — основную
+    ветку он не трогает, но незакоммиченные изменения уедут в новую ветку.
+    """
+
+    #: «Без рубрики» — скрипт выведет её из файла; «свой файл» — выбрать
+    #: любой .md на диске.
+    NO_RUBRIC = ""
+    OWN_RUBRIC = "свой"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("auto-improve: что улучшать")
+        self.setMinimumWidth(760)
+        self.own_criteria = ""
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Цикл улучшает один текстовый файл: правки предлагает одна "
+            "модель, оценивает их отдельная модель-судья по рубрике, а в "
+            "работу остаётся только выигравшее. Каждый шаг — отдельный "
+            "коммит в ветке improve/<тег>.",
+            wrap=True,
+        ))
+
+        row_file = QHBoxLayout()
+        row_file.addWidget(QLabel("Файл:   "))
+        self.artifact = QLineEdit()
+        self.artifact.setPlaceholderText("текстовый файл внутри git-репозитория")
+        self.artifact.setToolTip(
+            "Файл должен лежать внутри git-репозитория: улучшения скрипт "
+            "хранит коммитами в ветке improve/<тег>"
+        )
+        self.btn_pick = QPushButton("Выбрать…")
+        self.btn_pick.clicked.connect(self._pick_file)
+        row_file.addWidget(self.artifact, 1)
+        row_file.addWidget(self.btn_pick)
+        box.addLayout(row_file)
+
+        row_rubric = QHBoxLayout()
+        row_rubric.addWidget(QLabel("Рубрика:   "))
+        self.criteria = QComboBox()
+        self.criteria.setToolTip(
+            "Рубрика — markdown с размерами оценок, суммарно 100 баллов. "
+            "Готовые рубрики автора лежат в tools/thirdparty/auto-improve/"
+            "criteria. Без рубрики скрипт выведет её из файла — тогда "
+            "помогает «цель» ниже"
+        )
+        self.criteria.addItem("без рубрики — скрипт подберёт её сам", self.NO_RUBRIC)
+        for path in auto_improve.criteria_files():
+            self.criteria.addItem("рубрика автора: " + path.stem, str(path))
+        self.criteria.addItem("свой файл рубрики…", self.OWN_RUBRIC)
+        self.criteria.currentIndexChanged.connect(self._criteria_changed)
+        row_rubric.addWidget(self.criteria, 1)
+        box.addLayout(row_rubric)
+
+        row_goal = QHBoxLayout()
+        row_goal.addWidget(QLabel("Цель:   "))
+        self.goal = QLineEdit()
+        self.goal.setPlaceholderText(
+            "одной строкой: чего добиваемся (для авто-рубрики)"
+        )
+        row_goal.addWidget(self.goal, 1)
+        box.addLayout(row_goal)
+
+        row_tag = QHBoxLayout()
+        row_tag.addWidget(QLabel("Тег запуска:   "))
+        self.tag = QLineEdit()
+        self.tag.setPlaceholderText("v1 — из него делается ветка improve/v1")
+        row_tag.addWidget(self.tag, 1)
+        box.addLayout(row_tag)
+
+        row_limits = QHBoxLayout()
+        row_limits.addWidget(QLabel("Итераций:"))
+        self.iterations = QSpinBox()
+        self.iterations.setRange(1, auto_improve.MAX_ITERATIONS)
+        self.iterations.setValue(auto_improve.DEFAULT_ITERATIONS)
+        row_limits.addWidget(self.iterations)
+        row_limits.addWidget(QLabel("   Кандидатов за раунд:"))
+        self.candidates = QSpinBox()
+        self.candidates.setRange(1, 10)
+        self.candidates.setValue(auto_improve.DEFAULT_CANDIDATES)
+        row_limits.addWidget(self.candidates)
+        row_limits.addWidget(QLabel("   Порог остановки:"))
+        self.threshold = QSpinBox()
+        self.threshold.setRange(50, 100)
+        self.threshold.setValue(auto_improve.DEFAULT_THRESHOLD)
+        row_limits.addWidget(self.threshold)
+        row_limits.addWidget(QLabel("   Оценок на вариант:"))
+        self.eval_runs = QSpinBox()
+        self.eval_runs.setRange(1, 5)
+        self.eval_runs.setValue(auto_improve.DEFAULT_EVAL_RUNS)
+        row_limits.addWidget(self.eval_runs)
+        row_limits.addStretch(1)
+        box.addLayout(row_limits)
+
+        box.addWidget(ui.label(auto_improve.BRANCH_WARNING, wrap=True))
+        box.addWidget(ui.label(auto_improve.COST_WARNING, kind="dim", wrap=True))
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Запустить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        # Выбор файла — через системный диалог; тег подставляется из имени.
+        self.artifact.textChanged.connect(self._tag_from_file)
+
+    def _pick_file(self) -> None:
+        start = self.artifact.text().strip() or str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Файл для улучшения",
+            str(Path(start).parent if Path(start).parent.is_dir() else Path.home()),
+            "Текст и код (*.md *.txt *.py *.json *.yaml *.yml);;Все файлы (*)",
+        )
+        if chosen:
+            self.artifact.setText(chosen)
+
+    def _tag_from_file(self) -> None:
+        """Тег по умолчанию — имя файла без расширения, без запретных знаков."""
+        if self.tag.text().strip():
+            return
+        stem = Path(self.artifact.text().strip()).stem
+        clean = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in stem)
+        if clean:
+            self.tag.setText(clean[:40])
+
+    def _criteria_changed(self) -> None:
+        if self.criteria.currentData() != self.OWN_RUBRIC:
+            return
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Файл рубрики", str(Path.home()), "Рубрика (*.md);;Все файлы (*)"
+        )
+        if chosen:
+            self.own_criteria = chosen
+            self.criteria.setItemText(
+                self.criteria.currentIndex(), "свой файл: " + Path(chosen).name
+            )
+        else:
+            self.criteria.setCurrentIndex(0)
+
+    def values(self) -> dict:
+        """Выбор человека. Проверки полей — тут же, до запуска."""
+        item = self.criteria.currentData()
+        own_needed = item == self.OWN_RUBRIC
+        criteria = self.own_criteria if own_needed else str(item or "")
+        return {
+            "artifact": self.artifact.text().strip(),
+            "criteria": criteria,
+            "own_needed": own_needed,
+            "goal": self.goal.text().strip(),
+            "tag": self.tag.text().strip(),
+            "max_iterations": self.iterations.value(),
+            "candidates": self.candidates.value(),
+            "threshold": self.threshold.value(),
+            "eval_runs": self.eval_runs.value(),
+        }
+
+    def _accept(self) -> None:
+        values = self.values()
+        if not values["artifact"]:
+            self.status.setText("Не выбран файл для улучшения.")
+            return
+        if not Path(values["artifact"]).is_file():
+            self.status.setText("Такого файла нет: " + values["artifact"])
+            return
+        if values["own_needed"] and not values["criteria"]:
+            self.status.setText(
+                "Выбрана своя рубрика, но файл рубрики не указан — повтори выбор."
+            )
+            return
+        problem = auto_improve.tag_problem(values["tag"])
+        if problem:
+            self.status.setText(problem)
+            return
+        self.accept()
+
+
+class GreenlightScanDialog(QDialog):
+    """Что проверять greenlight: папка iOS-проекта и, если есть, собранный .ipa.
+
+    Ключи и флаги не спрашиваются: команды взяты из README автора. Для
+    облачной проверки тот же диалог спрашивает имя сборки — но сам облачный
+    запуск начинается только после отдельного подтверждения в окне.
+    """
+
+    def __init__(self, mode: str = "scan", parent=None) -> None:
+        super().__init__(parent)
+        self.mode = mode if mode in ("scan", "cloud") else "scan"
+        self.setMinimumWidth(720)
+        if self.mode == "cloud":
+            self.setWindowTitle("greenlight: проверка в облаке Revyl")
+        else:
+            self.setWindowTitle("greenlight: проверка iOS-приложения")
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        if self.mode == "cloud":
+            box.addWidget(ui.label(
+                "Проверка в облаке Revyl: greenlight отдаст сценарии "
+                "(восстановление покупок, вход через Apple, удаление "
+                "аккаунта) во внешний сервис и запустит их на облачном "
+                "устройстве. Нужны установленный CLI revyl и бесплатный "
+                "аккаунт. Всё остальное в greenlight работает офлайн.",
+                wrap=True,
+            ))
+        else:
+            box.addWidget(ui.label(
+                "greenlight проверит папку проекта против правил Apple: код, "
+                "файлы приватности, Info.plist и, если указать, собранный "
+                ".ipa. Проверка офлайн — наружу ничего не отправляется.",
+                wrap=True,
+            ))
+
+        row_project = QHBoxLayout()
+        row_project.addWidget(QLabel("Папка проекта:   "))
+        self.project = QLineEdit()
+        self.project.setPlaceholderText("папка с кодом приложения")
+        self.btn_pick_project = QPushButton("Выбрать…")
+        self.btn_pick_project.clicked.connect(self._pick_project)
+        row_project.addWidget(self.project, 1)
+        row_project.addWidget(self.btn_pick_project)
+        box.addLayout(row_project)
+
+        if self.mode == "cloud":
+            row_name = QHBoxLayout()
+            row_name.addWidget(QLabel("Имя сборки:   "))
+            self.build_name = QLineEdit()
+            self.build_name.setPlaceholderText(
+                "имя приложения или сборки в Revyl — из команды --build-name"
+            )
+            row_name.addWidget(self.build_name, 1)
+            box.addLayout(row_name)
+            self.ipa = QLineEdit()  # в облаке путь к ipa не нужен
+        else:
+            row_ipa = QHBoxLayout()
+            row_ipa.addWidget(QLabel("Файл .ipa:   "))
+            self.ipa = QLineEdit()
+            self.ipa.setPlaceholderText("необязательно: собранный .ipa для разбора бинарника")
+            self.btn_pick_ipa = QPushButton("Выбрать…")
+            self.btn_pick_ipa.clicked.connect(self._pick_ipa)
+            row_ipa.addWidget(self.ipa, 1)
+            row_ipa.addWidget(self.btn_pick_ipa)
+            box.addLayout(row_ipa)
+            self.build_name = QLineEdit()
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Проверить" if self.mode == "scan" else "Продолжить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _pick_project(self) -> None:
+        start = self.project.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Папка iOS-проекта", start if Path(start).is_dir() else str(Path.home())
+        )
+        if chosen:
+            self.project.setText(chosen)
+
+    def _pick_ipa(self) -> None:
+        start = self.ipa.text().strip() or str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Собранный файл .ipa", str(Path(start).parent),
+            "Приложение iOS (*.ipa);;Все файлы (*)",
+        )
+        if chosen:
+            self.ipa.setText(chosen)
+
+    def values(self) -> dict:
+        """Выбор человека. Проверки полей — тут же, до запуска."""
+        return {
+            "project": self.project.text().strip(),
+            "ipa": self.ipa.text().strip(),
+            "build_name": self.build_name.text().strip(),
+        }
+
+    def _accept(self) -> None:
+        values = self.values()
+        if not values["project"]:
+            self.status.setText("Не выбрана папка проекта.")
+            return
+        if not Path(values["project"]).is_dir():
+            self.status.setText("Такой папки нет: " + values["project"])
+            return
+        if values["ipa"] and not Path(values["ipa"]).is_file():
+            self.status.setText("Такого файла .ipa нет: " + values["ipa"])
+            return
+        if self.mode == "cloud" and not values["build_name"]:
+            self.status.setText(
+                "Не указано имя сборки: команда verify запускается с "
+                "«--build-name <имя>» (см. README автора)."
+            )
+            return
+        self.accept()
+
+
+class LmarenaTokenDialog(QDialog):
+    """Токен арены: вписать свежую куку `arena-auth-prod-v1`.
+
+    Токен берётся человеком в своём браузере — README форка описывает
+    именно этот путь (отправить сообщение на сайте, открыть средства
+    разработки, скопировать куку, начинается с `base64-`). Программа его
+    только сохраняет: файлом рядом с настройками opencode, откуда он
+    уезжает в config.json моста. В настройки opencode, в журнал и в
+    сообщения окна токен не попадает.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Токен арены для моста LMArena")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Как взять токен (путь из README форка): открой сайт арены, "
+            "отправь там сообщение любой модели, нажми F12, открой "
+            "«Application» → «Cookies», найди куку arena-auth-prod-v1 и "
+            "скопируй её значение целиком — оно начинается с base64-.",
+            wrap=True,
+        ))
+        box.addWidget(ui.label(
+            "Токен ляжет файлом " + lmarena.TOKEN_NAME + " рядом с "
+            "настройками opencode и в репозиторий не попадёт. В сам мост "
+            "он уезжает при «Запустить» и «Перезапустить». Свежий токен "
+            "заменяет прежний: старый мог протухнуть.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        self.token = QLineEdit()
+        self.token.setPlaceholderText("base64-…")
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token.setToolTip(
+            "Значение куки. Показывается точками: это секрет, и он должен "
+            "попадать в журнал как можно реже"
+        )
+        self.show_token = QCheckBox("Показать токен")
+        self.show_token.toggled.connect(
+            lambda on: self.token.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        box.addWidget(self.token)
+        box.addWidget(self.show_token)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Сохранить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _save(self) -> None:
+        messages, errors = lmarena.save_token(self.dest, self.token.text())
+        if errors:
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
 class CapsTab(ScrollPage):
     """Возможности базы для opencode — установка по выбору.
 
@@ -2288,6 +3179,11 @@ class CapsTab(ScrollPage):
         "ncp": "Мост NCP — память, библиотека, 7 инструментов",
         "agents": "12 агентов — поиск, план, код, проверка и другие",
         "antiblock": "Обход блокировок — запуск OpenCode через прокси, пул обновляется сам",
+        "rtk": "rtk — вывод команд короче (нужен rtk в PATH)",
+        "caveman": "caveman — ответы короче (правила в AGENTS.md)",
+        "pxpipe": "pxpipe — запросы картинками (локальный прокси)",
+        "auto-improve": "auto-improve — улучшение текста (цикл с судьёй)",
+        "greenlight": "greenlight — проверка iOS-приложения перед App Store",
     }
 
     def __init__(self, parent=None) -> None:
@@ -2322,9 +3218,251 @@ class CapsTab(ScrollPage):
         self.checks: dict[str, QCheckBox] = {}
         for name, _title in opencode_caps.CAPS_CHOICES:
             box = QCheckBox(self.TITLES.get(name, name))
-            box.setChecked(True)
+            # rtk и caveman по умолчанию выключены: у rtk нужен бинарник в
+            # PATH, caveman меняет стиль ответов. Молча включать такое нельзя.
+            box.setChecked(name not in opencode_caps.CAPS_OFF_BY_DEFAULT)
+            if name == "rtk":
+                box.setToolTip(
+                    "Плагин opencode от автора rtk: команды агента пойдут "
+                    "через rtk и вернут меньше текста. Сам rtk ставится по "
+                    "README автора (winget install rtk-ai.rtk или готовый "
+                    "архив). Программа проверит rtk живым запросом и, если "
+                    "его нет или версия старая, ничего не впишет"
+                )
+            if name == "caveman":
+                box.setToolTip(
+                    "Правила коротких ответов в AGENTS.md между метками базы. "
+                    "Текст правил — из tools/thirdparty/caveman, автор "
+                    "JuliusBrussee (Apache-2.0). Снимается галочкой или "
+                    "словами «stop caveman»"
+                )
+            if name == "pxpipe":
+                box.setToolTip(
+                    "Локальный прокси автора teamchong (MIT): часть запроса "
+                    "уезжает нейросети картинкой, и в окно контекста "
+                    "помещается больше. Сжатие с потерями — точные строки и "
+                    "код могут быть прочитаны неверно. Галочка только "
+                    "вписывает запись провайдера: сначала запусти прокси "
+                    "кнопкой ниже, иначе программа ничего не впишет"
+                )
+                box.toggled.connect(self._px_toggled)
+            if name == "auto-improve":
+                box.setToolTip(
+                    "Сторонний скрипт автора crimeacs (MIT): улучшает один "
+                    "текстовый файл точечными правками, а оценивает их "
+                    "отдельная модель-судья Gemini по рубрике. Нужны ключ "
+                    "судьи (кнопка «Вписать ключ судьи»), git и файл внутри "
+                    "git-репозитория. Цикл сам коммитит в ветку improve/<тег> "
+                    "и тратит токены — включай осознанно. Кнопка «Улучшить "
+                    "файл…» работает, только когда галочка отмечена"
+                )
+                box.toggled.connect(self._ai_toggled)
+            if name == "greenlight":
+                box.setToolTip(
+                    "Сторонний консольный сканер автора Revyl (MIT): читает "
+                    "исходники, файлы приватности и Info.plist, сверяет с "
+                    "правилами Apple и выдаёт список рисков с исправлениями. "
+                    "Основная проверка идёт офлайн, наружу ничего не "
+                    "отправляется. Для opencode-base (PyQt6, Windows) он не "
+                    "нужен — это опция для тех, кто делает приложения для "
+                    "iOS. Кнопка «Проверить iOS-приложение» работает, только "
+                    "когда галочка отмечена"
+                )
+                box.toggled.connect(self._gl_toggled)
             what_layout.addWidget(box)
             self.checks[name] = box
+        # Уровень caveman — единственная возможность с выбором внутри
+        # галочки. Уровень берётся из списка, как выбор браузера в блоке MCP.
+        row_level = QHBoxLayout()
+        row_level.addWidget(QLabel("Уровень caveman:   "))
+        self.caveman_level = QComboBox()
+        self.caveman_level.addItem("лёгкий — базовые правила автора", "lite")
+        self.caveman_level.addItem("полный — ultracave, самая жёсткая ступень", "full")
+        self.caveman_level.setToolTip(
+            "Лёгкий: без вступлений и воды. Полный (ultracave): куски фраз и "
+            "«каждый факт один раз» — заметно жёстче, подходит не всем задачам. "
+            "Заявленную экономию 65–75% называет автор; проверки независимо нет, "
+            "в его же README у ultracave — 35%, у лёгкого — 3%"
+        )
+        row_level.addWidget(self.caveman_level, 1)
+        what_layout.addLayout(row_level)
+        # --- pxpipe: не только галочка. Прокси — чужая программа, её надо
+        # запустить, остановить и выбрать, к какому провайдеру она
+        # пересылает запросы. Всё это рядом с галочкой: порядок «сначала
+        # прокси, потом галочка» должен быть виден сразу.
+        box_px = QGroupBox("pxpipe — пропускать запросы через локальный прокси")
+        px_layout = QVBoxLayout(box_px)
+        px_layout.addWidget(ui.label(
+            "Прокси запускается отдельной кнопкой и слушает только эту "
+            "машину (127.0.0.1:47821 — адрес из README автора). Галочка "
+            "«pxpipe — запросы картинками» впишет в настройки opencode "
+            "запись провайдера, смотрящую на этот прокси. Работает она "
+            "только при запущенном прокси, поэтому порядок такой: "
+            "сначала «Запустить pxpipe», потом галочка.",
+            kind="dim",
+            wrap=True,
+        ))
+        row_px_src = QHBoxLayout()
+        row_px_src.addWidget(QLabel("Источник для pxpipe:   "))
+        self.pxpipe_source = QComboBox()
+        self.pxpipe_source.setToolTip(
+            "Провайдер opencode, к которому прокси пересылает запросы "
+            "(PXPIPE_UPSTREAM из README автора). Модели берутся у него же: "
+            "своей модели у прокси нет. Список читается из настроек "
+            "opencode, выдумать его нельзя"
+        )
+        row_px_src.addWidget(self.pxpipe_source, 1)
+        px_layout.addLayout(row_px_src)
+        row_px_btns = QHBoxLayout()
+        self.btn_px_run = QPushButton("Запустить pxpipe")
+        self.btn_px_run.setToolTip(
+            "Поднять прокси: программа запустит npx pxpipe-proxy@0.14.0 "
+            "(версия из README автора), дождётся ответа панели и запомнит, "
+            "к какому провайдеру пересылать запросы. В настройки opencode "
+            "ничего не пишет"
+        )
+        self.btn_px_stop = QPushButton("Остановить pxpipe")
+        self.btn_px_stop.setToolTip(
+            "Остановить прокси, запущенный программой. Чужой процесс на "
+            "порту не трогается: без своего файла с номером процесса "
+            "программа только скажет, что прокси не её"
+        )
+        self.btn_px_check = QPushButton("Проверить pxpipe")
+        self.btn_px_check.setToolTip(
+            "Живая проверка: отвечает ли панель прокси на 127.0.0.1:47821 "
+            "и как сейчас выглядит состояние. Ничего не меняет"
+        )
+        self.btn_px_stats = QPushButton("Числа pxpipe")
+        self.btn_px_stats.setToolTip(
+            "Счётчики самого прокси из его журнала: сколько запросов "
+            "превращено в картинки, сколько прошло как есть, сколько "
+            "заняло времени. Числа его собственные, независимо мы их не "
+            "проверяли"
+        )
+        for button in (self.btn_px_run, self.btn_px_stop, self.btn_px_check,
+                       self.btn_px_stats):
+            row_px_btns.addWidget(button)
+        row_px_btns.addStretch(1)
+        px_layout.addLayout(row_px_btns)
+        what_layout.addWidget(box_px)
+        # --- auto-improve: тоже не только галочка. Ключ судьи, проверка
+        # окружения и запуск цикла — свои кнопки, а «Улучшить файл…» снята,
+        # пока галочка не отмечена: по умолчанию цикл не запускается.
+        box_ai = QGroupBox("auto-improve — улучшить файл циклом с судьёй")
+        ai_layout = QVBoxLayout(box_ai)
+        ai_layout.addWidget(ui.label(
+            "Сторонний скрипт автора crimeacs (лицензия MIT): он улучшает "
+            "один текстовый файл точечными правками, оценивает их отдельной "
+            "моделью-судьёй Gemini по рубрике и оставляет только выигравшее. "
+            "Каждый оставленный шаг — коммит в ветке improve/<тег>: история "
+            "коммитов и есть журнал улучшений. Файл должен лежать внутри "
+            "git-репозитория.",
+            kind="dim",
+            wrap=True,
+        ))
+        self.btn_ai_key_edit = QPushButton("Вписать ключ судьи")
+        self.btn_ai_key_edit.setToolTip(
+            "Ключ Gemini для модели-судьи: лежит файлом рядом с настройками "
+            "opencode (в репозиторий не попадает); уезжает в окружение "
+            "процесса при запуске цикла и не показывается в журнале"
+        )
+        row_ai_key = QHBoxLayout()
+        row_ai_key.addWidget(QLabel("Ключ судьи:   "))
+        self.ai_key_hint = ui.label("", kind="dim", wrap=True)
+        row_ai_key.addWidget(self.ai_key_hint, 1)
+        row_ai_key.addWidget(self.btn_ai_key_edit)
+        ai_layout.addLayout(row_ai_key)
+        self.ai_hint = ui.label("", kind="dim", wrap=True)
+        ai_layout.addWidget(self.ai_hint)
+        row_ai_btns = QHBoxLayout()
+        self.btn_ai_check = QPushButton("Проверить окружение")
+        self.btn_ai_check.setToolTip(
+            "Проверка без запуска: на месте ли копия скрипта, есть ли git, "
+            "умеет ли Python библиотеку requests и вписан ли ключ судьи. "
+            "Ничего не меняет и никуда не звонит"
+        )
+        self.btn_ai_run = QPushButton("Улучшить файл…")
+        self.btn_ai_run.setToolTip(
+            "Запустить цикл: выбирается файл, рубрика, цель и ограничения. "
+            "Скрипт сам создаст ветку improve/<тег> и будет коммитить в неё — "
+            "запускай на копии проекта или в отдельной ветке. Кнопка доступна "
+            "только при отмеченной галочке auto-improve"
+        )
+        self.btn_ai_history = QPushButton("Показать ход")
+        self.btn_ai_history.setToolTip(
+            "Таблица хода завершённого запуска: сколько итераций, что "
+            "оставлено, что откатили. История — из папки данных рядом с "
+            "настройками, а не из интернета"
+        )
+        for button in (self.btn_ai_check, self.btn_ai_run, self.btn_ai_history):
+            row_ai_btns.addWidget(button)
+        row_ai_btns.addStretch(1)
+        ai_layout.addLayout(row_ai_btns)
+        what_layout.addWidget(box_ai)
+        # --- greenlight: тоже не только галочка. Проверка окружения, сборка
+        # из исходников и три прогона — свои кнопки, а всё, что запускает
+        # сканер, снято, пока галочка не отмечена: по умолчанию он выключен.
+        box_gl = QGroupBox("greenlight — проверить iOS-приложение перед App Store")
+        gl_layout = QVBoxLayout(box_gl)
+        gl_layout.addWidget(ui.label(
+            "Сторонний консольный сканер автора Revyl (лицензия MIT): читает "
+            "исходники, файлы приватности и Info.plist и сверяет их с "
+            "правилами Apple App Store Review Guidelines, показывая находки "
+            "с уровнями CRITICAL, HIGH, WARN и INFO. Основная проверка "
+            "работает офлайн: наружу ничего не отправляется. Для "
+            "opencode-base (PyQt6, Windows) он не нужен — это опция для тех, "
+            "кто делает приложения для iOS.",
+            kind="dim",
+            wrap=True,
+        ))
+        self.gl_hint = ui.label("", kind="dim", wrap=True)
+        gl_layout.addWidget(self.gl_hint)
+        row_gl_btns = QHBoxLayout()
+        self.btn_gl_check = QPushButton("Проверить окружение")
+        self.btn_gl_check.setToolTip(
+            "Проверка без запуска: собран ли greenlight, сходится ли копия "
+            "исходников автора и есть ли Go с make для сборки. Ничего не "
+            "меняет и никуда не звонит"
+        )
+        self.btn_gl_build = QPushButton("Собрать greenlight")
+        self.btn_gl_build.setToolTip(
+            "Сборка из лежащих рядом исходников автора: `make build`, а без "
+            "make — та же команда напрямую. Нужен Go 1.24 или новее и "
+            "соединение с интернетом: зависимости Go программа не кладёт, "
+            "их качает сам go. Программа не ставит Go и не собирает ничего "
+            "без этой кнопки"
+        )
+        self.btn_gl_run = QPushButton("Проверить iOS-приложение…")
+        self.btn_gl_run.setToolTip(
+            "Основная проверка: greenlight preflight по папке проекта — "
+            "офлайн. Отдельно сохраняется машинный отчёт (JSON) рядом с "
+            "настройками. Кнопка доступна только при отмеченной галочке "
+            "greenlight"
+        )
+        self.btn_gl_dry = QPushButton("Список проверок")
+        self.btn_gl_dry.setToolTip(
+            "greenlight verify --dry-run: офлайн-прогон без устройства и "
+            "без аккаунта, показывает, какие сценарии будут проверяться, и "
+            "печатает готовые файлы тестов"
+        )
+        self.btn_gl_cloud = QPushButton("Проверка в облаке Revyl…")
+        self.btn_gl_cloud.setToolTip(
+            "Чужой облачный сервис Revyl: greenlight отправит туда "
+            "сценарии и запустит их на облачном устройстве. Понадобится "
+            "подтверждение, установленный CLI revyl и бесплатный аккаунт. "
+            "Кнопка доступна только при отмеченной галочке greenlight"
+        )
+        self.btn_gl_report = QPushButton("Открыть отчёты")
+        self.btn_gl_report.setToolTip(
+            "Машинные отчёты прошлых прогонов: лежат рядом с настройками "
+            "opencode в папке greenlight-data/отчёты. Ничего не запускает"
+        )
+        for button in (self.btn_gl_check, self.btn_gl_build, self.btn_gl_run,
+                       self.btn_gl_dry, self.btn_gl_cloud, self.btn_gl_report):
+            row_gl_btns.addWidget(button)
+        row_gl_btns.addStretch(1)
+        gl_layout.addLayout(row_gl_btns)
+        what_layout.addWidget(box_gl)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -2539,16 +3677,130 @@ class CapsTab(ScrollPage):
         self.btn_reg_auto = QPushButton("Настроить автоматически")
         self.btn_reg_auto.setToolTip(
             "Android Studio: поставить плагин из набора программы, включить "
-            "сервер в студии, проверить его и вписать в настройки opencode"
+            "сервер в студии, проверить его и вписать в настройки opencode. "
+            "DBHub: проверить связь с базой живым запросом и вписать сервер. "
+            "Браузеры: открыть страницу выбранным браузером и вписать сервер"
         )
         self.btn_reg_auto.setEnabled(False)
         self.btn_reg_off = QPushButton("Выключить")
         self.btn_reg_src = QPushButton("Открыть источник")
+        # Подключения DBHub. Кнопки стоят в общем ряду, но живут только
+        # для своей строки: у остальных серверов подключений к базам нет.
+        self.btn_db_add = QPushButton("Добавить подключение")
+        self.btn_db_add.setToolTip(
+            "DBHub: вписать базу — файл mcp-dbhub.toml рядом с настройками "
+            "opencode. Пароль из строки подключения программа сохранит "
+            "отдельным файлом"
+        )
+        self.btn_db_add.setEnabled(False)
+        self.btn_db_check = QPushButton("Проверить соединение")
+        self.btn_db_check.setToolTip(
+            "DBHub: поднять сервер и спросить у него протоколом, отвечает ли "
+            "база. Ничего не записывает — только говорит, жива ли связь"
+        )
+        self.btn_db_check.setEnabled(False)
+        # Кнопки браузеров. Тоже живут только для своей строки: у
+        # остальных серверов выбирать нечего — они запускаются командой.
+        self.btn_br_choose = QPushButton("Выбрать браузер")
+        self.btn_br_choose.setToolTip(
+            "Браузеры: Chrome, Edge, Яндекс.Браузер или Firefox; профиль "
+            "нейросети и показывать ли окно. Выбор ляжет в mcp-browsers.json "
+            "рядом с настройками opencode"
+        )
+        self.btn_br_choose.setEnabled(False)
+        self.btn_br_check = QPushButton("Проверить браузер")
+        self.btn_br_check.setToolTip(
+            "Браузеры: поднять мост, открыть страницу и прочитать её "
+            "заголовок. Ничего не записывает — говорит, работает ли выбранный "
+            "браузер и видно ли страницу"
+        )
+        self.btn_br_check.setEnabled(False)
+        # Кнопки OmniRoute. Своя строка и своя работа: развернуть пакет,
+        # поднять сервер, перезапустить его и показать состояние. В
+        # opencode ничего из этого не пишет — пишет только автонастройка.
+        self.btn_or_deploy = QPushButton("Развернуть")
+        self.btn_or_deploy.setToolTip(
+            "OmniRoute: поставить пакет из npm в свою папку моста. Это "
+            "сотни мегабайт и несколько минут; служебные папки Node.js "
+            "программа не трогает"
+        )
+        self.btn_or_deploy.setEnabled(False)
+        self.btn_or_start = QPushButton("Запустить")
+        self.btn_or_start.setToolTip(
+            "OmniRoute: поднять локальный сервер (панель и API на "
+            "http://127.0.0.1:20128) и дождаться ответа API. Ничего не "
+            "записывает в настройки opencode"
+        )
+        self.btn_or_start.setEnabled(False)
+        self.btn_or_restart = QPushButton("Перезапустить")
+        self.btn_or_restart.setToolTip(
+            "OmniRoute: остановить сервер и поднять снова, затем живая "
+            "проверка. Так же лечится зависший мост. Заново подключает "
+            "бесплатных провайдеров без ключа"
+        )
+        self.btn_or_restart.setEnabled(False)
+        self.btn_or_status = QPushButton("Показать статус")
+        self.btn_or_status.setToolTip(
+            "OmniRoute: что развёрнуто, отвечает ли API, какая версия и "
+            "сколько провайдеров подключено. Ни ключей, ни токенов в "
+            "ответе нет"
+        )
+        self.btn_or_status.setEnabled(False)
+        # Кнопки моста LMArena. Своя строка и своя работа: развернуть
+        # окружение форка, поднять мост, перезапустить его, показать
+        # состояние и положить токен арены. В opencode ничего из этого не
+        # пишет — пишет только автонастройка, и только после ответа модели.
+        self.btn_lm_deploy = QPushButton("Развернуть")
+        self.btn_lm_deploy.setToolTip(
+            "LMArena: поставить окружение моста (.venv) и его зависимости "
+            "из requirements.txt в папку tools/thirdparty/lmarena. Код форка "
+            "уже в репозитории; чужие папки пакетов не трогаются"
+        )
+        self.btn_lm_deploy.setEnabled(False)
+        self.btn_lm_start = QPushButton("Запустить")
+        self.btn_lm_start.setToolTip(
+            "LMArena: перенести токен из файла рядом с настройками в "
+            "config.json моста и поднять его на http://127.0.0.1:8000. "
+            "Перед первым запуском программа покажет предупреждения"
+        )
+        self.btn_lm_start.setEnabled(False)
+        self.btn_lm_restart = QPushButton("Перезапустить")
+        self.btn_lm_restart.setToolTip(
+            "LMArena: остановить мост и поднять заново — так лечится "
+            "зависший мост и так же подхватывается обновлённый токен"
+        )
+        self.btn_lm_restart.setEnabled(False)
+        self.btn_lm_status = QPushButton("Показать статус")
+        self.btn_lm_status.setToolTip(
+            "LMArena: что развёрнуто, отвечает ли мост, есть ли токен "
+            "арены и сколько моделей он знает. Токена самого в ответе нет"
+        )
+        self.btn_lm_status.setEnabled(False)
+        self.btn_lm_token = QPushButton("Обновить токен")
+        self.btn_lm_token.setToolTip(
+            "LMArena: вписать свежую куку arena-auth-prod-v1 с сайта арены. "
+            "Токен ляжет файлом рядом с настройками opencode и уедет в "
+            "config.json моста, а не в настройки opencode"
+        )
+        self.btn_lm_token.setEnabled(False)
         row_mcp.addWidget(self.btn_reg_check)
         row_mcp.addWidget(self.btn_reg_on)
         row_mcp.addWidget(self.btn_reg_auto)
         row_mcp.addWidget(self.btn_reg_off)
         row_mcp.addWidget(self.btn_reg_src)
+        row_mcp.addWidget(self.btn_db_add)
+        row_mcp.addWidget(self.btn_db_check)
+        row_mcp.addWidget(self.btn_br_choose)
+        row_mcp.addWidget(self.btn_br_check)
+        row_mcp.addWidget(self.btn_or_deploy)
+        row_mcp.addWidget(self.btn_or_start)
+        row_mcp.addWidget(self.btn_or_restart)
+        row_mcp.addWidget(self.btn_or_status)
+        row_mcp.addWidget(self.btn_lm_deploy)
+        row_mcp.addWidget(self.btn_lm_start)
+        row_mcp.addWidget(self.btn_lm_restart)
+        row_mcp.addWidget(self.btn_lm_status)
+        row_mcp.addWidget(self.btn_lm_token)
         row_mcp.addStretch(1)
         mcp_layout.addLayout(row_mcp)
 
@@ -2563,11 +3815,20 @@ class CapsTab(ScrollPage):
         self.btn_install.clicked.connect(self._install)
         self.btn_remove = QPushButton("Убрать отмеченное")
         self.btn_remove.clicked.connect(self._remove)
+        self.btn_rtk_measure = QPushButton("Замерить rtk")
+        self.btn_rtk_measure.setToolTip(
+            "rtk: запустить одну и ту же длинную команду дважды — напрямую и "
+            "через rtk — и показать, сколько байт увидит нейросеть. Это и есть "
+            "проверка «вывод стал короче», числами. Ничего не записывает; "
+            "нет rtk — скажет прямо, что замер не сделан"
+        )
+        self.btn_rtk_measure.clicked.connect(self._rtk_measure)
         self.btn_refresh = QPushButton("Обновить состояние")
         self.btn_refresh.clicked.connect(self._refresh)
         buttons.addWidget(self.btn_install)
         buttons.addWidget(self.btn_remove)
         buttons.addStretch(1)
+        buttons.addWidget(self.btn_rtk_measure)
         buttons.addWidget(self.btn_refresh)
         outer.addLayout(buttons)
 
@@ -2591,11 +3852,44 @@ class CapsTab(ScrollPage):
         self.btn_reg_auto.clicked.connect(self._reg_auto)
         self.btn_reg_off.clicked.connect(self._reg_disable)
         self.btn_reg_src.clicked.connect(self._reg_open_source)
+        self.btn_db_add.clicked.connect(self._db_add_source)
+        self.btn_db_check.clicked.connect(self._db_check)
+        self.btn_br_choose.clicked.connect(self._br_choose)
+        self.btn_br_check.clicked.connect(self._br_check)
+        self.btn_or_deploy.clicked.connect(self._or_deploy)
+        self.btn_or_start.clicked.connect(self._or_start)
+        self.btn_or_restart.clicked.connect(self._or_restart)
+        self.btn_or_status.clicked.connect(self._or_status)
+        self.btn_lm_deploy.clicked.connect(self._lm_deploy)
+        self.btn_lm_start.clicked.connect(self._lm_start)
+        self.btn_lm_restart.clicked.connect(self._lm_restart)
+        self.btn_lm_status.clicked.connect(self._lm_status)
+        self.btn_lm_token.clicked.connect(self._lm_token)
+        self.btn_px_run.clicked.connect(self._px_run)
+        self.btn_px_stop.clicked.connect(self._px_stop)
+        self.btn_px_check.clicked.connect(self._px_check)
+        self.btn_px_stats.clicked.connect(self._px_stats)
+        self.btn_ai_key_edit.clicked.connect(self._ai_key)
+        self.btn_ai_check.clicked.connect(self._ai_check)
+        self.btn_ai_run.clicked.connect(self._ai_run)
+        self.btn_ai_history.clicked.connect(self._ai_history)
+        self.btn_gl_check.clicked.connect(self._gl_check)
+        self.btn_gl_build.clicked.connect(self._gl_build)
+        self.btn_gl_run.clicked.connect(self._gl_run)
+        self.btn_gl_dry.clicked.connect(self._gl_dry)
+        self.btn_gl_cloud.clicked.connect(self._gl_cloud)
+        self.btn_gl_report.clicked.connect(self._gl_report)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
         self._fill_caps_skills()
         self._reg_load()
+        # «Улучшить файл…» доступна, только когда галочка auto-improve
+        # отмечена: по умолчанию цикл запускать нечем.
+        self._ai_toggled(self.checks["auto-improve"].isChecked())
+        # Кнопки greenlight — по галочке greenlight: по умолчанию сканер
+        # выключен и ничего не запускается.
+        self._gl_toggled(self.checks["greenlight"].isChecked())
         self._refresh()
 
         outer.activate()
@@ -2654,21 +3948,23 @@ class CapsTab(ScrollPage):
         return mcp_registry.load_manual_config(dest, server.id) is not None
 
     # Серверы, которые программа умеет настроить целиком сама.
-    AUTO_SERVERS = ("android-studio", "obs", "android-emulator")
+    AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub",
+                    "browsers", "omniroute", "lmarena")
 
     def _reg_auto_possible(self, server: mcp_registry.Server | None) -> tuple[bool, str]:
         """Можно ли настроить автоматически и что этому мешает.
 
-        Автонастройка умеет ровно три вещи: Android Studio, OBS и
-        эмулятор Android. Остальные серверы запускаются командой, и
-        «Настроить автоматически» для них был бы кнопкой вроде
-        работающей.
+        Автонастройка умеет ровно семь вещей: Android Studio, OBS,
+        эмулятор Android, DBHub, браузеры, OmniRoute и LMArena. Остальные
+        серверы запускаются командой, и «Настроить автоматически» для них
+        был бы кнопкой вроде работающей.
         """
         if server is None:
             return False, (
                 "Выберите строку в списке: автонастройка есть у Android "
-                "Studio, OBS и Android-эмулятора. У LDPlayer она не нужна — "
-                "ему достаточно кнопки «Включить»."
+                "Studio, OBS, Android-эмулятора, DBHub, Браузеров, "
+                "OmniRoute и LMArena. У LDPlayer она не нужна — ему "
+                "достаточно кнопки «Включить»."
             )
         if server.id not in self.AUTO_SERVERS:
             return False, (
@@ -2686,6 +3982,13 @@ class CapsTab(ScrollPage):
         """
         if server.installed:
             return "включён"
+        if server.id == "browsers":
+            # У браузеров до выбора нечего проверять: без файла выбора
+            # живая проверка возьмёт Chrome по умолчанию, а человек мог
+            # хотеть Яндекс.Браузер. Честнее сказать, что ждём выбора.
+            dest = self._reg_dest()
+            if dest is None or not browsers.config_path(dest).is_file():
+                return "нужно: выбрать браузер"
         if not server.requirements:
             return "не проверено"
         if not server.has_connection:
@@ -2800,6 +4103,87 @@ class CapsTab(ScrollPage):
         # её, а не ждём ошибки по нажатию.
         possible, _ = self._reg_auto_possible(server)
         self.btn_reg_auto.setEnabled(possible)
+        # Кнопки подключений — только у DBHub: больше ни один сервер
+        # не ходит в базы, и «Добавить подключение» у него означало бы
+        # пустую кнопку.
+        is_db = server is not None and server.id == "dbhub"
+        self.btn_db_add.setEnabled(is_db)
+        self.btn_db_check.setEnabled(
+            is_db and bool(dbhub.read_sources(self._reg_dest() or Path()))
+        )
+        # Кнопки браузеров — только у своей строки: у остальных серверов
+        # выбирать нечего, они запускаются командой.
+        is_br = server is not None and server.id == "browsers"
+        self.btn_br_choose.setEnabled(is_br)
+        self.btn_br_check.setEnabled(is_br)
+        # Кнопки OmniRoute — только у своей строки: у остальных серверов
+        # разворачивать, запускать и перезапускать нечего.
+        is_or = server is not None and server.id == "omniroute"
+        self.btn_or_deploy.setEnabled(is_or)
+        self.btn_or_start.setEnabled(is_or)
+        self.btn_or_restart.setEnabled(is_or)
+        self.btn_or_status.setEnabled(is_or)
+        # Кнопки LMArena — только у своей строки: у остальных серверов нет
+        # ни окружения форка, ни токена арены.
+        is_lm = server is not None and server.id == "lmarena"
+        self.btn_lm_deploy.setEnabled(is_lm)
+        self.btn_lm_start.setEnabled(is_lm)
+        self.btn_lm_restart.setEnabled(is_lm)
+        self.btn_lm_status.setEnabled(is_lm)
+        self.btn_lm_token.setEnabled(is_lm)
+        if is_db:
+            sources = dbhub.read_sources(self._reg_dest() or Path())
+            if sources:
+                names = ", ".join(s.id for s in sources)
+                self.reg_hint.setText(
+                    f"Подключения DBHub: {names}. «Проверить соединение» "
+                    "поднимает сервер и спрашивает протоколом, отвечает ли "
+                    "база. «Настроить автоматически» делает то же и вписывает "
+                    "сервер в настройки opencode."
+                )
+            else:
+                self.reg_hint.setText(
+                    "Подключений к базам пока нет: у DBHub без них нечего "
+                    "проверять и нечего включать. Начни с «Добавить подключение»."
+                )
+        elif is_br:
+            dest = self._reg_dest() or Path()
+            choice = browsers.read_choice(dest)
+            chosen = browsers.config_path(dest).is_file()
+            head = ("Выбрано: " + browsers.description(choice) + ". "
+                    if chosen else
+                    "Браузер ещё не выбран: пока не выберешь, проверять "
+                    "нечего. ")
+            self.reg_hint.setText(
+                head
+                + "«Проверить браузер» открывает страницу и читает заголовок — "
+                "это и есть доказательство, что браузер работает. «Настроить "
+                "автоматически» делает то же и вписывает сервер в настройки "
+                "opencode."
+            )
+        elif is_lm:
+            token = ("токен арены уже вписан" if lmarena.token_present(
+                self._reg_dest() or Path()) else
+                "токена арены пока нет — без него моделей не будет")
+            self.reg_hint.setText(
+                "Порядок: «Развернуть» (окружение моста и зависимости), "
+                "«Обновить токен» (кука arena-auth-prod-v1 с сайта арены — "
+                f"{token}), «Запустить» (мост на http://127.0.0.1:8000), "
+                "«Показать статус», затем «Настроить автоматически»: она "
+                "спросит у модели ответ и только потом впишет мост и "
+                "провайдера с моделями арены в настройки opencode. Мост "
+                "выключен по умолчанию и включается после предупреждений."
+            )
+        elif is_or:
+            self.reg_hint.setText(
+                "Порядок: «Развернуть» (пакет из npm в папку моста), "
+                "«Запустить» (панель и API на http://127.0.0.1:20128), "
+                "«Показать статус», затем «Настроить автоматически»: она "
+                "подключит бесплатных провайдеров без ключа и впишет мост "
+                "в настройки opencode. Что-то зависнет — «Перезапустить»."
+            )
+        else:
+            self.reg_hint.clear()
         if server is None:
             self.reg_detail.setPlainText("Выберите сервер, чтобы увидеть подробности.")
             return
@@ -2809,6 +4193,31 @@ class CapsTab(ScrollPage):
         target = conn.get("url") or " ".join(conn.get("command") or [])
         if target:
             lines.append(f"Команда: {target}")
+        if server.id == "browsers":
+            # Что именно запустится — видно прямо здесь: браузер, профиль и
+            # окно живут в файле выбора, и без этой строки человек не понял
+            # бы, что уйдёт в npx.
+            dest = self._reg_dest() or Path()
+            choice = browsers.read_choice(dest)
+            br = browsers.browser(choice.browser)
+            lines.append("")
+            lines.append(f"Выбрано: {browsers.description(choice)}")
+            lines.append("Запуск: " + " ".join(browsers.command(dest, choice)))
+            lines.append(f"Профиль: {browsers.profile_dir(dest, br.key)}")
+            lines.append(browsers.hint(br.key, choice))
+        if server.id == "omniroute":
+            # Состояние моста словами: развёрнут ли, отвечает ли API,
+            # какая версия и сколько провайдеров. Здесь же адрес панели:
+            # куда идти человеку за ключами провайдеров.
+            dest = self._reg_dest() or Path()
+            lines.append("")
+            lines.append(omniroute.status_text(dest))
+            lines.append(f"Панель и API: http://{omniroute.DEFAULT_HOST}:{omniroute.DEFAULT_PORT}")
+            lines.append(f"Папка данных: {omniroute.data_dir(dest)}")
+            lines.append(
+                "Ключи провайдеров лежат в папке данных и в настройки "
+                "opencode не попадают."
+            )
         if raw.get("why"):
             lines.append("")
             lines.append(str(raw["why"]))
@@ -2891,13 +4300,315 @@ class CapsTab(ScrollPage):
             self._reg_ask_config(server, dest)
             return
 
+        # DBHub без подключения к базе — блок, которому нечего отдавать,
+        # а с нерабочей базой — блок, который opencode будет ждать 30
+        # секунд и покажет «Не удалось». Поэтому у него «Включить» идёт
+        # тем же путём, что автонастройка: сначала живая проверка связи,
+        # и только потом запись.
+        if server.id == "dbhub":
+            self._reg_auto()
+            return
+
+        # У моста LMArena «Включить» идёт тем же путём, что автонастройка:
+        # без токена арены и ответа модели блок в настройках был бы
+        # нерабочим, а сам мост включается только после предупреждений.
+        if server.id == "lmarena":
+            self._reg_auto()
+            return
+
         def job(progress):
             return mcp_registry.enable(dest, server, progress=progress)
 
         self._start(job, "registry")
 
+    def _db_add_source(self) -> None:
+        """Вписывает подключение к базе в файл DBHub.
+
+        Подключение — не настройка opencode, а отдельный файл рядом с
+        ними. Поэтому он живёт не в кнопке «Включить», а в своей:
+        вписать базу можно и до включения сервера, и для второй базы.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "dbhub":
+            self._warn("Подключения к базам есть только у DBHub. "
+                       "Выберите его строку в списке.")
+            return
+
+        dialog = DbhubConnectionDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self.log.add(
+            "Дальше — «Проверить соединение»: живая проверка скажет, "
+            "отвечает ли база, до записи в настройки opencode.", "ok"
+        )
+        self._reg_show_detail()
+
+    def _db_check(self) -> None:
+        """Живая проверка связи с базами DBHub.
+
+        Настоящий разговор с сервером по протоколу MCP: сервер поднимает
+        сама программа, отвечает он или нет — видно по ответу, а не по
+        тому, что порт занят. Ничего не записывает.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "dbhub":
+            self._warn("Проверять связь с базой умеет только DBHub. "
+                       "Выберите его строку в списке.")
+            return
+        sources = dbhub.read_sources(dest)
+        if not sources:
+            self._warn("Подключений нет. Нажми «Добавить подключение» "
+                       "и впиши базу.")
+            return
+
+        def job(progress):
+            return dbhub.check_connection(dest, sources, progress=progress)
+
+        self._start(job, "dbhub")
+
+    def _br_choose(self) -> None:
+        """Выбор браузера, профиля и окна для моста Playwright MCP.
+
+        Выбор ложится отдельным файлом рядом с настройками opencode, а не
+        в них самих: сменить браузер можно, не трогая настройки opencode.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "browsers":
+            self._warn("Выбирать браузер можно только у строки «Браузеры». "
+                       "Выберите её в списке.")
+            return
+
+        dialog = BrowserChoiceDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self._reg_show_detail()
+
+    def _br_check(self) -> None:
+        """Живая проверка браузера.
+
+        Поднимает мост и открывает страницу выбранным браузером: сервер
+        отвечает, страница открылась, заголовок прочитан. Ничего не
+        записывает — только говорит, работает ли выбранный браузер.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "browsers":
+            self._warn("Проверять браузер можно только у строки «Браузеры». "
+                       "Выберите её в списке.")
+            return
+        if not browsers.config_path(dest).is_file():
+            self._warn("Браузер ещё не выбран. Нажми «Выбрать браузер», "
+                       "иначе проверять нечего.")
+            return
+        choice = browsers.read_choice(dest)
+
+        def job(progress):
+            return browsers.check_connection(dest, choice, progress=progress)
+
+        self._start(job, "browsers")
+
+    def _or_target(self) -> Path | None:
+        """Папка настроек и строка OmniRoute — общая проверка для кнопок.
+
+        Четыре кнопки моста делают разное, но требование у них одно:
+        выбрана папка настроек opencode и выделена строка «OmniRoute».
+        Иначе нажатие было бы враньём — оно трогало бы чужую строку.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return None
+        if server is None or server.id != "omniroute":
+            self._warn("Это работа строки «OmniRoute». Выберите её в списке.")
+            return None
+        return dest
+
+    def _or_deploy(self) -> None:
+        """Разворачивает OmniRoute в папку моста. В opencode не пишет."""
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.deploy(progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_start(self) -> None:
+        """Поднимает сервер, ждёт ответа API и подключает бесплатных.
+
+        В opencode не пишет. Провайдеры подключаются здесь же, потому что
+        каталог бесплатных у новой версии мог измениться, а человек про
+        второй шаг помнить не должен.
+        """
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.bring_up(dest, progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_restart(self) -> None:
+        """Перезапускает сервер и заново подключает бесплатных провайдеров.
+
+        Так же лечится зависший или упавший мост. Каталог бесплатных
+        провайдеров читается заново, поэтому изменившийся список
+        подхватывается сам.
+        """
+        dest = self._or_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return omniroute.restart(dest, progress=progress)
+
+        self._start(job, "omniroute")
+
+    def _or_status(self) -> None:
+        """Показывает состояние моста словами: ничего не меняет."""
+        dest = self._or_target()
+        if dest is None:
+            return
+        text = omniroute.status_text(dest)
+        self.log.clear_log()
+        self.log.add(text, "ok" if "отвечает" in text else "warn")
+        # Подробности под таблицей обновляются тем же текстом: там его
+        # видно, не открывая журнал.
+        self._reg_show_detail()
+
+    def _lm_target(self) -> Path | None:
+        """Папка настроек и строка LMArena — общая проверка для кнопок.
+
+        Пять кнопок моста делают разное, но требование у них одно:
+        выбрана папка настроек opencode и выделена строка «LMArena».
+        Иначе нажатие трогало бы чужую строку.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return None
+        if server is None or server.id != "lmarena":
+            self._warn("Это работа строки «LMArena». Выберите её в списке.")
+            return None
+        return dest
+
+    def _lm_confirm(self) -> bool:
+        """Спрашивает согласие на работу через веб-сервис арены.
+
+        Мост выключен по умолчанию, поэтому согласие спрашивается перед
+        каждым включением: один раз прочитанное предупреждение не должно
+        превращаться в «я когда-то нажал галочку».
+        """
+        dialog = LmarenaWarningDialog(self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _lm_deploy(self) -> None:
+        """Ставит окружение моста и зависимости. В opencode не пишет."""
+        dest = self._lm_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return lmarena.deploy(progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_start(self) -> None:
+        """Поднимает мост и ждёт ответа API. В opencode ничего не пишет."""
+        dest = self._lm_target()
+        if dest is None or not self._lm_confirm():
+            return
+
+        def job(progress):
+            return lmarena.bring_up(dest, progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_restart(self) -> None:
+        """Перезапускает мост: так лечится зависший и подхватывается токен."""
+        dest = self._lm_target()
+        if dest is None or not self._lm_confirm():
+            return
+
+        def job(progress):
+            return lmarena.restart(dest, progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_status(self) -> None:
+        """Показывает состояние моста словами: ничего не меняет."""
+        dest = self._lm_target()
+        if dest is None:
+            return
+        text = lmarena.status_text(dest)
+        self.log.clear_log()
+        self.log.add(text, "ok" if "отвечает" in text else "warn")
+        self._reg_show_detail()
+
+    def _lm_token(self) -> None:
+        """Спрашивает свежий токен арены и кладёт его рядом с настройками.
+
+        Мост читает токен только из своего config.json, поэтому после
+        сохранения предлагается перезапуск: список моделей мост тянет с
+        арены на старте и раз в полчаса, а не по каждому запросу.
+        """
+        dest = self._lm_target()
+        if dest is None:
+            return
+        dialog = LmarenaTokenDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        if lmarena.deployed() and lmarena.health(dest, timeout=3)[0]:
+            answer = QMessageBox.question(
+                self,
+                "Мост уже запущен",
+                "Токен сохранён. Мост уже запущен — перезапустить его "
+                "сейчас, чтобы он сразу взял новый токен и перечитал "
+                "список моделей с арены?\n\nЭто то же, что кнопка "
+                "«Перезапустить».",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._lm_restart()
+        self._reg_show_detail()
+
     def _reg_auto(self) -> None:
-        """Настраивает Android Studio целиком, без конфигураций вручную."""
+        """Настраивает сервер целиком, без конфигураций вручную.
+
+        Автонастройка умеет Android Studio, OBS, эмулятор, DBHub, браузеры,
+        OmniRoute и LMArena. У DBHub она упирается в подключение: без
+        вписанной базы проверять нечего, поэтому сначала предлагается
+        «Добавить подключение». У OmniRoute порядок другой: развернуть,
+        запустить, получить ответ API — и только потом писать в настройки.
+        У LMArena так же, но проверка строже: живой ответ модели через
+        арену. Не ответила — в настройки не пишется ничего.
+        """
         dest = self._reg_dest()
         if dest is None:
             self._warn("Не выбрана папка настроек opencode.")
@@ -2938,6 +4649,11 @@ class CapsTab(ScrollPage):
             if password is None:
                 return
 
+        # Мост LMArena спрашивает согласие каждый раз: он работает через
+        # веб-сервис арены, и «я согласился когда-то раньше» тут не годится.
+        if server.id == "lmarena" and not self._lm_confirm():
+            return
+
         def job(progress):
             if server.id == "android-studio":
                 return android_studio.auto_setup(dest, server, progress=progress)
@@ -2945,6 +4661,14 @@ class CapsTab(ScrollPage):
                 return bridges.auto_setup_obs(
                     dest, server, password, progress=progress,
                     allow_install_path_fix=fix_install_path)
+            if server.id == "dbhub":
+                return dbhub.auto_setup(dest, server, progress=progress)
+            if server.id == "browsers":
+                return browsers.auto_setup(dest, server, progress=progress)
+            if server.id == "omniroute":
+                return omniroute.auto_setup(dest, server, progress=progress)
+            if server.id == "lmarena":
+                return lmarena.auto_setup(dest, server, progress=progress)
             return bridges.auto_setup_emulator(dest, server, progress=progress)
 
         self._start(job, "registry")
@@ -3249,6 +4973,114 @@ class CapsTab(ScrollPage):
         else:
             self.state_hint.setStyleSheet(f"color: {ui.TEXT_DIM};")
             self.state_hint.setText("Наших возможностей здесь пока нет.")
+        # Строка про rtk и caveman — отдельно от «уже стоит». Без неё
+        # галочка «rtk» выглядела бы рабочей, хотя без бинарника в PATH она
+        # ничего не впишет: программа обязана сказать это до нажатия.
+        try:
+            data = rtk.status(dest)
+        except Exception:
+            data = {}
+        try:
+            cword = str(caveman.status(dest).get("word") or "")
+        except Exception:
+            cword = ""
+        notes: list[str] = []
+        if data:
+            if data.get("binary"):
+                notes.append(
+                    "rtk: программа найдена"
+                    + (f" ({data['version']})" if data.get("version") else "")
+                    + "."
+                )
+            else:
+                notes.append(
+                    "rtk: программа не найдена в PATH — включение ничего не "
+                    "впишет, пока она не поставлена по README автора."
+                )
+        notes.append(
+            "caveman: сейчас уровень «" + (cword or "лёгкий")
+            + "», галочка выберет тот, что стоит в списке."
+        )
+        # Строка про pxpipe: без запущенного прокси галочка ничего не
+        # впишет, и сказать об этом надо до нажатия, а не после.
+        try:
+            px = pxpipe.status(dest)
+        except Exception:
+            px = {}
+        if px:
+            where = str(px.get("upstream") or "")
+            if px.get("running"):
+                notes.append(
+                    "pxpipe: прокси отвечает"
+                    + (f" и пересылает запросы к {where}" if where else "")
+                    + ("." if px.get("ours") else " (запущен не программой).")
+                )
+            else:
+                notes.append(
+                    "pxpipe: прокси не отвечает — пока он не запущен, "
+                    "включение ничего не впишет в настройки."
+                )
+        # Строка про auto-improve: цикл не пойдёт без ключа, git и requests,
+        # и сказать об этом надо до нажатия, а не после.
+        try:
+            ai = auto_improve.check(dest)
+        except Exception:
+            ai = {}
+        try:
+            ai_tags = auto_improve.seen_tags(dest)
+        except Exception:
+            ai_tags = []
+        if ai:
+            if ai.get("ready"):
+                notes.append(
+                    "auto-improve: готов к запуску, "
+                    + auto_improve.key_status(dest)
+                    + (f"; ход: {len(ai_tags)}" if ai_tags else "")
+                    + "."
+                )
+            else:
+                notes.append(
+                    "auto-improve: не готов — "
+                    + "; ".join(ai.get("missing") or []) + "."
+                )
+            self.ai_key_hint.setText(auto_improve.key_status(dest) + ".")
+            self.ai_hint.setText(auto_improve.status_text(dest))
+            self.btn_ai_run.setEnabled(bool(self.checks["auto-improve"].isChecked()))
+        # Строка про greenlight: не собран, нет Go или копия разошлась — об
+        # этом надо сказать до нажатия, а не после.
+        try:
+            gl = greenlight.check(dest)
+        except Exception:
+            gl = {}
+        if gl:
+            if gl.get("ready"):
+                notes.append("greenlight: " + greenlight.status_text(dest))
+            else:
+                notes.append(
+                    "greenlight: не готов — " + "; ".join(gl.get("missing") or []) + "."
+                )
+            self.gl_hint.setText(greenlight.status_text(dest))
+            self.btn_gl_run.setEnabled(bool(self.checks["greenlight"].isChecked()))
+            self.btn_gl_dry.setEnabled(bool(self.checks["greenlight"].isChecked()))
+            self.btn_gl_cloud.setEnabled(bool(self.checks["greenlight"].isChecked()))
+        # Список источников для pxpipe: читаем здесь, в главном потоке.
+        try:
+            choices = pxpipe.provider_choices(dest)
+        except Exception:
+            choices = []
+        keep = str(self.pxpipe_source.currentData() or "")
+        self.pxpipe_source.blockSignals(True)
+        self.pxpipe_source.clear()
+        for name in choices:
+            self.pxpipe_source.addItem(name, name)
+        if not choices:
+            self.pxpipe_source.addItem("провайдеров в настройках нет", "")
+        if keep:
+            index = self.pxpipe_source.findData(keep)
+            if index >= 0:
+                self.pxpipe_source.setCurrentIndex(index)
+        self.pxpipe_source.blockSignals(False)
+        self.state_hint.setText(self.state_hint.text() + "\n" + "\n".join(notes))
 
     # ---- выбор папки
 
@@ -3317,6 +5149,10 @@ class CapsTab(ScrollPage):
             self._warn("Ничего не отмечено — отметьте хотя бы одну галочку.")
             return
         base = self._base()
+        # Уровень caveman и источник pxpipe читаем здесь, в главном потоке:
+        # из рабочего потока трогать виджеты нельзя.
+        level = str(self.caveman_level.currentData() or "lite")
+        px_source = str(self.pxpipe_source.currentData() or "")
 
         def job(progress):
             m1, e1 = ([], [])
@@ -3325,12 +5161,430 @@ class CapsTab(ScrollPage):
                 m1, e1 = opencode_caps.install_caps(
                     base, dest, selection, progress=progress,
                     antiblock_opts=self._antiblock_opts(),
+                    caveman_level=level,
+                    pxpipe_provider=px_source,
                 )
             if pselection:
-                m2, e2 = opencode_caps.install_providers(dest, pselection, progress=progress)
+                # У LMArena блок провайдера собирается из живого моста:
+                # имена моделей называет арена, и выдумать их нельзя. Мост
+                # молчит — пропускаем его и говорим словами, а не пишем
+                # провайдера без моделей.
+                chosen = set(pselection)
+                blocks: dict[str, str] = {}
+                lm_names: list[str] = []
+                if "lmarena" in chosen:
+                    names, note = lmarena.chat_models(dest)
+                    if names:
+                        lm_names = names
+                        blocks["lmarena"] = lmarena.provider_block(names)
+                    else:
+                        chosen.discard("lmarena")
+                        e2.append(
+                            "LMArena пропущен: модели моста не прочитались ("
+                            + (note or "список пуст")
+                            + "). Запусти мост и обнови токен — тогда "
+                            "список моделей подставится сам."
+                        )
+                if chosen:
+                    m2, e2 = opencode_caps.install_providers(
+                        dest, chosen, progress=progress, blocks=blocks)
+                    m2 = list(m2)
+                    if "lmarena" in chosen:
+                        m2.append(
+                            f"Провайдер LMArena вписан с моделями арены: "
+                            f"{len(lm_names)}."
+                        )
+                else:
+                    m2 = []
             return (m1 + m2, e1 + e2)
 
         self._start(job, "install")
+
+    def _rtk_measure(self) -> None:
+        """Замер rtk: длинная команда дважды, числами. Ничего не записывает."""
+        def job(progress):
+            return rtk.measure()
+
+        self._start(job, "measure")
+
+    def _ai_toggled(self, on: bool) -> None:
+        """Галочка auto-improve разрешает кнопку «Улучшить файл…».
+
+        Сама галочка ничего не блокирует и не запускает: она лишь открывает
+        кнопку. Всё остальное — проверка окружения перед записью и
+        предупреждения перед циклом.
+        """
+        button = getattr(self, "btn_ai_run", None)
+        if button is not None:
+            button.setEnabled(bool(on))
+        if on:
+            self.log.add(
+                "auto-improve отмечен. Цикл тратит токены и коммитит в ветку "
+                "improve/<тег> — запускай на копии проекта или в отдельной ветке.",
+                "warn",
+            )
+
+    def _gl_toggled(self, on: bool) -> None:
+        """Галочка greenlight разрешает кнопки сканера.
+
+        Как и у auto-improve, галочка сама ничего не запускает: она лишь
+        открывает кнопки. Облачная проверка вдобавок требует отдельного
+        подтверждения — про это сказано и в окне, и в журнале.
+        """
+        for name in ("btn_gl_run", "btn_gl_dry", "btn_gl_cloud"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(bool(on))
+        if on:
+            self.log.add(
+                "greenlight отмечен. Проверка «preflight» и «список проверок» "
+                "идут офлайн; «Проверка в облаке Revyl» отправит сценарии в "
+                "сторонний сервис — для неё спрашивается отдельное "
+                "подтверждение.",
+                "warn",
+            )
+
+    def _ai_dest(self) -> Path | None:
+        """Папка настроек для кнопок auto-improve. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _ai_key(self) -> None:
+        """Спрашивает ключ судьи и кладёт его рядом с настройками."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        dialog = AutoImproveKeyDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self._refresh()
+
+    def _ai_check(self) -> None:
+        """Проверка окружения: скрипт, git, requests, ключ. Ничего не меняет."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            data = auto_improve.check(dest)
+            lines = [auto_improve.status_text(dest)]
+            if data.get("script_ok"):
+                rubrics = auto_improve.criteria_files()
+                lines.append(
+                    f"Копия скрипта на месте, рубрик для выбора: {len(rubrics)}."
+                )
+            tags = auto_improve.seen_tags(dest)
+            lines.append(
+                "Готовых запусков в папке данных: " + (str(len(tags)) if tags else "нет")
+                + (" (" + ", ".join(tags[:5]) + ")" if tags else "")
+            )
+            errors = [] if data.get("ready") else list(data.get("missing") or [])
+            return lines, errors
+
+        self._start(job, "auto-improve")
+
+    def _ai_run(self) -> None:
+        """Запускает цикл улучшения выбранного файла.
+
+        Порядок такой: диалог с файлом, рубрикой и ограничениями, затем
+        подтверждение — и только потом цикл. Само подтверждение говорит про
+        ветку improve/<тег> и про то, что незакоммиченные правки уедут в неё.
+        """
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        if not self.checks["auto-improve"].isChecked():
+            self._warn(
+                "Сначала отметь галочку «auto-improve — улучшение текста»: "
+                "по умолчанию цикл выключен."
+            )
+            return
+        dialog = AutoImproveDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        answer = QMessageBox.question(
+            self,
+            "Запуск auto-improve",
+            auto_improve.BRANCH_WARNING
+            + "\n\nВетка: improve/"
+            + values["tag"]
+            + "\nФайл: "
+            + values["artifact"]
+            + "\n\nПродолжить?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def job(progress):
+            return auto_improve.launch(
+                dest,
+                Path(values["artifact"]),
+                values["tag"],
+                criteria=values["criteria"],
+                goal=values["goal"],
+                max_iterations=values["max_iterations"],
+                candidates=values["candidates"],
+                threshold=values["threshold"],
+                eval_runs=values["eval_runs"],
+                progress=progress,
+            )
+
+        self._start(job, "auto-improve")
+
+    def _ai_history(self) -> None:
+        """Показывает ход завершённого запуска — таблицу печатает сам скрипт."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        tags = auto_improve.seen_tags(dest)
+        default = tags[0] if tags else ""
+        tag, ok = QInputDialog.getText(
+            self,
+            "Ход auto-improve",
+            "Тег запуска (ветка improve/<тег>):"
+            + (f"\nГотовые: {', '.join(tags[:8])}" if tags else "\nГотовых запусков пока нет."),
+            text=default,
+        )
+        if not ok or not tag.strip():
+            return
+        chosen = tag.strip()
+
+        def job(progress):
+            return auto_improve.history(dest, chosen, progress=progress)
+
+        self._start(job, "auto-improve")
+
+    def _gl_dest(self) -> Path | None:
+        """Папка настроек для кнопок greenlight. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _gl_check(self) -> None:
+        """Живая проверка окружения greenlight. Ничего не меняет."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            data = greenlight.check(dest)
+            line = ("Живая проверка: " if data.get("binary_ok") else "Живая проверка не прошла: ")
+            text = greenlight.status_text(dest)
+            if data.get("ready"):
+                return [line + text], []
+            return [line + text], list(data.get("missing") or []) or [text]
+
+        self._start(job, "greenlight")
+
+    def _gl_build(self) -> None:
+        """Собирает greenlight из исходников автора. Go программа не ставит."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not greenlight.find_go():
+            self._warn(greenlight.NO_GO_NOTE)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Сборка greenlight",
+            "Собрать greenlight из исходников автора командой `make build` "
+            "(а без make — той же командой напрямую)?\n\n"
+            "Нужны Go 1.24 или новее и интернет: исходники автора лежат "
+            "рядом, а вот зависимости Go качает сам `go`. Сборка займёт "
+            "несколько минут.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def job(progress):
+            return greenlight.build(dest, progress=progress)
+
+        self._start(job, "greenlight")
+
+    def _gl_run(self) -> None:
+        """Основная проверка iOS-приложения. Офлайн."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку «greenlight — проверка iOS-приложения "
+                "перед App Store»: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("scan", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+
+        def job(progress):
+            return greenlight.scan(
+                dest, values["project"], ipa=values["ipa"], progress=progress,
+            )
+
+        self._start(job, "greenlight")
+
+    def _gl_dry(self) -> None:
+        """Список проверок без облака: verify --dry-run. Офлайн."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку greenlight: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("scan", self)
+        dialog.setWindowTitle("greenlight: список проверок без облака")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+
+        def job(progress):
+            return greenlight.verify_dry(dest, values["project"], progress=progress)
+
+        self._start(job, "greenlight")
+
+    def _gl_cloud(self) -> None:
+        """Проверка в облаке Revyl — только по явному подтверждению.
+
+        Подтверждение спрашивается отдельно и перед каждым запуском: тут
+        единственное место, где greenlight выходит наружу, и «однажды
+        согласился» здесь не считается.
+        """
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку greenlight: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("cloud", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        answer = QMessageBox.question(
+            self, "Проверка в облаке Revyl", greenlight.CLOUD_WARNING,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.log.add("Облачная проверка отменена: подтверждения не было.", "warn")
+            return
+
+        def job(progress):
+            return greenlight.verify_cloud(
+                dest, values["project"], values["build_name"],
+                confirm=True, progress=progress,
+            )
+
+        self._start(job, "greenlight")
+
+    def _gl_report(self) -> None:
+        """Открывает папку с машинными отчётами. Ничего не запускает."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        folder = greenlight.reports_dir(dest)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except OSError as exc:
+            self._warn(f"Папку отчётов открыть не удалось: {exc}")
+            return
+        files = greenlight.reports_seen(dest)
+        self.log.add(
+            f"Отчёты greenlight: {len(files)} в {folder}."
+            if files else f"Отчётов пока нет — папка открыта: {folder}.",
+            "info",
+        )
+
+    def _px_confirm(self) -> bool:
+        """Спрашивает согласие на сжатие запросов картинками.
+
+        Галочка снята по умолчанию, поэтому согласие спрашивается и при
+        её включении, и перед каждым запуском прокси: один раз прочитанное
+        предупреждение не должно превращаться в «я когда-то согласился».
+        """
+        dialog = PxpipeWarningDialog(self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _px_toggled(self, on: bool) -> None:
+        """Галочка pxpipe включается только после согласия.
+
+        Выключению согласие не нужно: отказаться должно быть всегда можно.
+        """
+        if not on:
+            return
+        if self._px_confirm():
+            return
+        box = self.checks.get("pxpipe")
+        if box is not None:
+            box.blockSignals(True)
+            box.setChecked(False)
+            box.blockSignals(False)
+        self.log.add("pxpipe остался выключен: согласие не дано.", "warn")
+
+    def _px_dest(self) -> Path | None:
+        """Папка настроек для кнопок pxpipe. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _px_run(self) -> None:
+        """Поднимает прокси pxpipe. В настройки opencode не пишет."""
+        dest = self._px_dest()
+        if dest is None or not self._px_confirm():
+            return
+        source = str(self.pxpipe_source.currentData() or "")
+
+        def job(progress):
+            return pxpipe.start(dest, provider=source, progress=progress)
+
+        self._start(job, "pxpipe")
+
+    def _px_stop(self) -> None:
+        """Останавливает прокси, который запустила программа."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            return pxpipe.stop(dest, progress=progress)
+
+        self._start(job, "pxpipe")
+
+    def _px_check(self) -> None:
+        """Живая проверка прокси: отвечает ли панель. Ничего не меняет."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            ok, note = pxpipe.dashboard_ok()
+            line = ("Живая проверка: " if ok else "Живая проверка не прошла: ") + note
+            if not ok:
+                return [line], [note]
+            return [line, pxpipe.status_text(dest)], []
+
+        self._start(job, "pxpipe")
+
+    def _px_stats(self) -> None:
+        """Числа прокси из его журнала. Ничего не пишет."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            return pxpipe.stats(dest, progress=progress)
+
+        self._start(job, "pxpipe")
 
     def _remove(self) -> None:
         dest = self._dest()

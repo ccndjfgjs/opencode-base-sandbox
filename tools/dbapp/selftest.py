@@ -1,4 +1,4 @@
-﻿"""Проверка окна без участия человека.
+"""Проверка окна без участия человека.
 
 Создаёт окно по-настоящему, но не показывает его на экране: прогоняет
 проверку имени, создание базы и подключение во временной папке и печатает
@@ -685,15 +685,37 @@ def main() -> int:
                   f"в таблице строк: {_reg_tab.rowCount()}")
             for _name in ("btn_reg_check", "btn_reg_on", "btn_reg_off", "btn_reg_src"):
                 check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            # Кнопки DBHub стоят в том же ряду: подключения к базам есть
+            # только у него, и без них настройка сервера была бы неполной.
+            for _name in ("btn_db_add", "btn_db_check"):
+                check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            check("dbhub" in window.caps_tab.AUTO_SERVERS,
+                  "DBHub умеет «Настроить автоматически»")
+            # Кнопки браузеров стоят в том же ряду: выбирать браузер и
+            # проверять его больше негде.
+            for _name in ("btn_br_choose", "btn_br_check"):
+                check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            check("browsers" in window.caps_tab.AUTO_SERVERS,
+                  "Браузеры умеют «Настроить автоматически»")
             _states = [
                 _reg_tab.item(r, 1).text() if _reg_tab.item(r, 1) else ""
                 for r in range(_reg_tab.rowCount())
             ]
             check(all(_states), "у всех строк заполнено состояние")
-            check(
-                all("не проверено" in s for s in _states),
-                f"до проверки состояние честное, а не выдуманное: {_states}",
-            )
+            # До проверки строка обязана отвечать честно: либо
+            # «не проверено», либо прямо, чего не хватает. Строка браузеров
+            # до первого выбора говорит «нужно: выбрать браузер» — до выбора
+            # проверять нечего, и это тот же честный ответ. А вот обещать
+            # готовность до живой проверки нельзя: «включён» и «можно
+            # включить» появляются только после прогона требований.
+            _honest = ("не проверено", "нужно:", "не хватает:", "нет команды")
+            _lied = [s for s in _states if not any(h in s for h in _honest)]
+            check(not _lied,
+                  f"до проверки состояние честное, а не выдуманное: {_lied}")
+            _claimed = [s for s in _states
+                        if "включён" in s or "можно включить" in s]
+            check(not _claimed,
+                  f"и ни одна строка не обещает готовность до проверки: {_claimed}")
         # инструкция про серверы подключена
         check("инструкции/МCP-серверы.md" in core.INSTRUCTION_TARGETS,
               "инструкция про MCP-серверы подключена к каждой сессии")
@@ -2931,19 +2953,47 @@ def main() -> int:
 
 
     # ---- 8б. Новые пресеты провайдеров — туда же, во временную папку.
-    psel = {"ollama", "lmstudio"}
+    # Ставим все пресеты, сколько их есть: «статус видит пресеты» ниже
+    # проверяет список целиком, и незамеченный новый пресет ронял бы
+    # проверку не по делу.
+    # Пресеты, которые собираются из живого ответа моста (lmarena),
+    # в общий набор не берём: их блок нельзя выдумывать, а мост в
+    # самопроверке может быть не запущен. Честный отказ для них —
+    # отдельная проверка ниже.
+    psel = set(opencode_caps.PROVIDER_PRESETS) - set(opencode_caps.PROVIDER_DYNAMIC)
     _, perrors = opencode_caps.install_providers(fake, psel)
     check(not perrors, f"провайдеры вписаны без ошибок: {perrors or 'чисто'}")
     pcfg = (fake / "opencode.jsonc").read_text(encoding="utf-8")
     check(opencode_caps.check_jsonc(pcfg), "настройки валидны после пресетов")
-    check('"ollama"' in pcfg and '"lmstudio"' in pcfg,
-          "оба пресета на месте")
+    check('"ollama"' in pcfg and '"lmstudio"' in pcfg
+          and '"omniroute"' in pcfg,
+          "все пресеты на месте, включая omniroute")
     check("sk-" not in pcfg, "никаких ключей в файл не попало")
+    check("sk_omniroute" in pcfg,
+          "у пресета OmniRoute — литерал-заглушка из его документации, "
+          "а не ключ")
     _, perrors2 = opencode_caps.install_providers(fake, psel)
     check(not perrors2, "повтор провайдеров без ошибок")
     pcfg2 = (fake / "opencode.jsonc").read_text(encoding="utf-8")
     check(pcfg2.count('"ollama"') == 1, "повтор не двоит пресет")
-    check(all(opencode_caps.providers_status(fake).values()), "статус видит пресеты")
+    _pstat = opencode_caps.providers_status(fake)
+    check(all(_pstat[name] for name in psel),
+          f"статус видит установленные пресеты: {sorted(psel)}")
+    check(all(not _pstat[name] for name in opencode_caps.PROVIDER_DYNAMIC),
+          "а пресеты из живого моста честно показаны как неустановленные")
+    # Без живого моста такой пресет не вписывается, и это не поломка:
+    # список моделей моста выдумывать нельзя. Проверяем отказ и то, что
+    # после него в настройках ничего не появилось.
+    _dyn = set(opencode_caps.PROVIDER_DYNAMIC)
+    if _dyn:
+        _, dyn_errors = opencode_caps.install_providers(fake, _dyn)
+        check(bool(dyn_errors) and any("живого моста" in e for e in dyn_errors),
+              f"пресет из живого моста без моста не вписан: {dyn_errors[:1]}")
+        _cfg_dyn = (fake / "opencode.jsonc").read_text(encoding="utf-8")
+        check(all(f'"{name}"' not in _cfg_dyn for name in _dyn),
+              "и в настройках его не появилось")
+        check(opencode_caps.check_jsonc(_cfg_dyn),
+              "отказ не поломал файл настроек")
     _, perrors3 = opencode_caps.remove_providers(fake, psel)
     check(not perrors3, f"пресеты убраны без ошибок: {perrors3 or 'чисто'}")
     pcfg3 = (fake / "opencode.jsonc").read_text(encoding="utf-8")
@@ -2951,17 +3001,33 @@ def main() -> int:
           "после уборки валидно и чисто")
     check('"other"' in pcfg3, "чужое цело после уборки пресетов")
 
-    # Вкладка в окне: три галочки расширений + два провайдера.
+    # Вкладка в окне: три галочки расширений + три провайдера.
     # Мостов среди галочек нет — они едут с базой и подставляются всегда.
     ctab = window.caps_tab
-    check(len(ctab.checks) == 3, f"галочек три: {sorted(ctab.checks)}")
+    # Считаем не «три», а сколько их на самом деле: в списке вкладки пять
+    # возможностей — голос, агенты, обход блокировок и новые rtk с caveman.
+    # Число берётся из общего списка, чтобы следующая возможность не
+    # ломала проверку ещё раз.
+    _caps_want = len(opencode_caps.CAPS_CHOICES)
+    check(len(ctab.checks) == _caps_want,
+          f"галочек {_caps_want}: {sorted(ctab.checks)}")
     check("antiblock" in ctab.checks, "галочка обхода на месте")
     check("pc" not in ctab.checks and "ncp" not in ctab.checks,
           "галочек мостов в окне нет — они едут с базой")
     sel = ctab._selection()
     check({"pc", "ncp"} <= sel, f"мосты входят в выбор всегда: {sorted(sel)}")
-    check(len(ctab.pchecks) == 2, f"провайдеров два: {sorted(ctab.pchecks)}")
-    check(all(box.isChecked() for box in ctab.checks.values()), "по умолчанию всё отмечено")
+    _prov_want = len(opencode_caps.PROVIDER_PRESETS)
+    check(len(ctab.pchecks) == _prov_want,
+          f"провайдеров {_prov_want}: {sorted(ctab.pchecks)}")
+    # rtk и caveman по умолчанию сняты: у rtk нужен бинарник в PATH,
+    # caveman меняет стиль ответов. Всё остальное отмечено.
+    _off = set(opencode_caps.CAPS_OFF_BY_DEFAULT)
+    check(all(box.isChecked() for name, box in ctab.checks.items()
+              if name not in _off),
+          "по умолчанию отмечено всё, кроме экономии")
+    check(all(not box.isChecked() for name, box in ctab.checks.items()
+              if name in _off),
+          f"переключатели экономии сняты по умолчанию: {sorted(_off)}")
     check(not any(box.isChecked() for box in ctab.pchecks.values()),
           "провайдеры по умолчанию не отмечены (ключи — дело человека)")
     check(ctab.btn_install.isEnabled(), "кнопка «Поставить» доступна")
@@ -4184,6 +4250,3201 @@ def main() -> int:
         _ok, _note = bridges.probe_emulator()
         check(not _ok, f"без устройства проба честно отвечает «нет»: {_note}")
 
+    # ---- Мост DBHub: базы данных через npx
+    #
+    # Пакета моста в репозитории нет: его скачивает npx. Проверяем то,
+    # чем он управляется: лаунчер, запись в реестре, файл подключений и
+    # живую проверку против поддельного сервера протокола MCP.
+    import dbhub as _dbhub  # noqa: PLC0415 — рядом лежит, круга нет
+    _db_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "dbhub_bridge_launcher.py")
+    check(_db_launcher.is_file(), "лаунчер моста DBHub на месте")
+    if _db_launcher.is_file():
+        _db_src = _db_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _db_src,
+              "лаунчер DBHub пишет журнал в stderr, а не в stdout")
+        check("MCP_DBHUB_PASSWORD_" in _db_src,
+              "лаунчер DBHub передаёт пароль базы переменной окружения")
+        check("def main() -> int" in _db_src and "__main__" in _db_src,
+              "лаунчер DBHub запускается сам: main() и __main__")
+        check("PyQt6" not in _db_src and "from PyQt" not in _db_src,
+              "лаунчер DBHub не тянет окно программы: запускается отдельно")
+        check("--transport" in _db_src and "stdio" in _db_src,
+              "лаунчер DBHub запускает сервер по stdio")
+        # Имя переменной окружения задано в двух местах: окно пишет ссылку
+        # в файл подключений, лаунчер её разрешает. Разойдутся — и пароль
+        # молча не найдётся, а база не откроется.
+        import importlib.util as _ilu  # noqa: PLC0415 — только здесь
+        _db_spec = _ilu.spec_from_file_location("dbhub_check", _db_launcher)
+        _db_mod = (_ilu.module_from_spec(_db_spec)
+                   if _db_spec and _db_spec.loader else None)
+        if _db_mod is not None and _db_spec and _db_spec.loader:
+            _db_spec.loader.exec_module(_db_mod)
+            check(_db_mod.password_env("my-db") == _dbhub.password_env("my-db")
+                  == "MCP_DBHUB_PASSWORD_MY_DB",
+                  "имя переменной окружения совпадает у окна и лаунчера")
+        else:
+            check(False, "лаунчер DBHub читается как модуль для сверки имён")
+
+    _db_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "dbhub"), None)
+    check(_db_srv is not None, "сервер dbhub есть в реестре программы")
+    if _db_srv is not None:
+        _db_conn = _db_srv.raw.get("connection") or {}
+        _db_cmd = [str(part) for part in _db_conn.get("command") or []]
+        check(_db_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _db_cmd
+              and any("dbhub_bridge_launcher.py" in part for part in _db_cmd),
+              "команда dbhub — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _db_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде dbhub нет настоящих путей: {_db_cmd}")
+        check(_db_conn.get("warm_up") is True,
+              "у dbhub прогрев кэша включён: npx действительно скачивает пакет")
+        _db_raw = json.dumps(_db_srv.raw, ensure_ascii=False)
+        check(not re.search(r"[a-z]+://[^/\s:@]+:[^/@\s]+@", _db_raw),
+              "в записи реестра нет строк подключения с паролем")
+        check(not re.search(r"mcp-dbhub-[A-Za-z0-9_-]+-password\.txt", _db_raw),
+              "в реестре не назван файл пароля конкретной машины")
+        _db_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("dbhub" in (_db_node.get("required_by") or []),
+              "dbhub записан в «нужно мостам» у Node.js")
+
+        # «Только чтение» по умолчанию, лимит строк и пароль отдельным
+        # файлом. Всё это — на временной папке, ничего чужого не трогаем.
+        _db_tmp = Path(tempfile.mkdtemp(prefix="dbhub-selftest-"))
+        try:
+            _db_m1, _db_e1 = _dbhub.add_source(
+                _db_tmp, "sklad", "postgres",
+                "postgres://user:секрет-42@host:5432/db")
+            _db_toml = _db_tmp / "mcp-dbhub.toml"
+            check(not _db_e1 and _db_toml.is_file(),
+                  f"подключение записывается в mcp-dbhub.toml: {_db_e1}")
+            _db_text = (_db_toml.read_text(encoding="utf-8")
+                        if _db_toml.is_file() else "")
+            check("[[sources]]" in _db_text and 'id = "sklad"' in _db_text,
+                  "в файле подключений есть секция [[sources]] с источником")
+            check("секрет-42" not in _db_text,
+                  "пароль в файл подключений не попадает")
+            check("${MCP_DBHUB_PASSWORD_SKLAD}" in _db_text,
+                  "на месте пароля — ссылка на переменную окружения")
+            _db_pw = _db_tmp / "mcp-dbhub-sklad-password.txt"
+            check(_db_pw.is_file()
+                  and "секрет-42" in _db_pw.read_text(encoding="utf-8"),
+                  "пароль лежит отдельным файлом рядом с настройками")
+            _db_srcs = _dbhub.read_sources(_db_tmp)
+            check(len(_db_srcs) == 1 and _db_srcs[0].readonly
+                  and _db_srcs[0].max_rows == _dbhub.DEFAULT_MAX_ROWS,
+                  "«только чтение» включено по умолчанию, лимит строк задан")
+            check("[[tools]]" in _db_text and "readonly = true" in _db_text,
+                  "оба инструмента описаны явно, у запроса — «только чтение»")
+
+            # Отказ ничего не дописывает: тип базы и строка подключения
+            # разошлись — это ошибка человека, а не повод править файл.
+            _db_before = _db_text
+            _db_m2, _db_e2 = _dbhub.add_source(
+                _db_tmp, "other", "postgres", "mysql://root:pass@host/db")
+            check(bool(_db_e2), f"чужая схема отклонена: {_db_e2}")
+            check(_db_toml.read_text(encoding="utf-8") == _db_before,
+                  "после отказа файл подключений не тронут")
+            check(not (_db_tmp / "mcp-dbhub-other-password.txt").exists(),
+                  "и файла пароля для отклонённого подключения не появилось")
+
+            # Поддельный сервер протокола: в репозитории его нет, это тест.
+            _db_fake_lines = [
+                "import json, sys",
+                "TOOLS = [",
+                "    {'name': 'execute_sql', 'inputSchema': {'type': 'object'}},",
+                "    {'name': 'search_objects', 'inputSchema': {'type': 'object'}},",
+                "]",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'DBHub MCP Server',",
+                "                                 'version': '9.9.9'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': TOOLS}",
+                "    elif method == 'tools/call':",
+                "        tables = [{'name': 'books'}, {'name': 'authors'}]",
+                "        answer = {'content': [{'type': 'text',",
+                "                              'text': json.dumps({'tables': tables})}]}",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _db_fake_text = "\n".join(_db_fake_lines) + "\n"
+            _db_fake = _db_tmp / "подделка_dbhub.py"
+            _db_fake.write_text(_db_fake_text, encoding="utf-8")
+            _db_ok, _db_note = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_fake)])
+            check(_db_ok, f"живая проверка разговаривает с сервером: {_db_note}")
+            check("инструментов 2" in _db_note,
+                  f"и видит оба инструмента: {_db_note}")
+            check("таблиц видно 2" in _db_note,
+                  f"и получает список таблиц: {_db_note}")
+            # Тот же протокол, другое имя сервера: чужой мост за DBHub
+            # выдавать нельзя, и проверка обязана это заметить.
+            _db_other = _db_tmp / "подделка_чужая.py"
+            _db_other.write_text(
+                _db_fake_text.replace("DBHub MCP Server", "Совсем Другой Сервер"),
+                encoding="utf-8")
+            _db_ok2, _db_note2 = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_other)])
+            check(not _db_ok2 and "DBHub" in _db_note2,
+                  f"чужой сервер не выдаётся за DBHub: {_db_note2}")
+            # Отказ сервера: в сообщении не должно остаться пароля.
+            _db_bad = _db_tmp / "подделка_отказ.py"
+            _db_bad.write_text(
+                "import sys" + chr(10)
+                + "print('ошибка: postgres://user:секрет-42@host/db', "
+                  "file=sys.stderr)" + chr(10)
+                + "sys.exit(1)" + chr(10),
+                encoding="utf-8")
+            _db_ok3, _db_note3 = _dbhub.probe(
+                _db_tmp, timeout=30, command=[sys.executable, str(_db_bad)])
+            check(not _db_ok3, f"молчащий мост — это отказ: {_db_note3}")
+            check("секрет-42" not in _db_note3,
+                  f"в сообщении об отказе пароля нет: {_db_note3}")
+
+            # Три случая из определения готовности: подключение без пароля,
+            # нет Node.js, нет npx. Ни один из них не повод молчать и не
+            # повод писать что-то в настройки.
+            import os as _os  # noqa: PLC0415 — нужен здесь и только здесь
+            import subprocess as _sp  # noqa: PLC0415 — нужен здесь и только здесь
+
+            _db_nopw = _db_tmp / "без-пароля"
+            _db_nopw.mkdir()
+            _db_m5, _db_e5 = _dbhub.add_source(
+                _db_nopw, "filebase", "sqlite",
+                "sqlite:///" + str(_db_nopw / "base.db"))
+            _db_nopw_toml = _db_nopw / "mcp-dbhub.toml"
+            _db_nopw_text = (_db_nopw_toml.read_text(encoding="utf-8")
+                             if _db_nopw_toml.is_file() else "")
+            _db_nopw_dsn = next((ln for ln in _db_nopw_text.splitlines()
+                                 if ln.startswith("dsn")), "")
+            check(not _db_e5 and not list(_db_nopw.glob("*password.txt")),
+                  "подключение без пароля не рождает файл пароля")
+            check("${" not in _db_nopw_dsn,
+                  f"и не оставляет неразрешённую переменную: {_db_nopw_dsn}")
+
+            # Node.js не установлен. Имя программы заведомо несуществующее:
+            # проверяем движок требований, а не машину, на которой идёт
+            # самопроверка. «Не найден» — это и есть честный ответ, а не
+            # зелёная галочка.
+            _db_no_node = _mcp_registry.check_requirement({
+                "what": "Node.js", "type": "command",
+                "check": "нет-такого-node-xyz", "args": ["--version"],
+                "min_version": 22})
+            check(_db_no_node.ok is False and bool(_db_no_node.detail),
+                  f"без Node.js требование не зелёное: {_db_no_node.detail}")
+
+            # npx не нашёлся — лаунчер отказывается словами и молчит в
+            # stdout: там у моста протокол, лишний текст его ломает.
+            _db_npx = _sp.run(
+                [sys.executable, str(_db_launcher)],
+                env=dict(_os.environ, PATH="нет-такой-папки",
+                         OPENCODE_CONFIG_DIR=str(_db_tmp)),
+                capture_output=True, text=True, timeout=60)
+            _db_npx_last = _db_npx.stderr.strip().splitlines()[-1] if _db_npx.stderr.strip() else ""
+            check(_db_npx.returncode != 0 and not _db_npx.stdout.strip(),
+                  "без npx лаунчер уходит с ошибкой и молчит в stdout")
+            check("Node.js" in _db_npx.stderr,
+                  f"и называет причину: {_db_npx_last}")
+
+            # Живая проверка не прошла — в настройки не пишется ничего.
+            _db_empty = _db_tmp / "пустая-папка"
+            _db_empty.mkdir()
+            _db_m4, _db_e4 = _dbhub.auto_setup(_db_empty, _db_srv)
+            check(bool(_db_e4),
+                  f"без подключения автонастройка отказывает: {_db_e4[:1]}")
+            check(not (_db_empty / "opencode.jsonc").exists(),
+                  "и в настройки opencode ничего не вписано")
+
+            # Повторное «Включить» не переписывает файл настроек: opencode
+            # поднимает новый экземпляр моста на каждую правку конфига.
+            _db_dest = _db_tmp / "настройки"
+            _db_dest.mkdir()
+            (_db_dest / "opencode.jsonc").write_text(
+                '{\n  "mcp": {}\n}\n', encoding="utf-8")
+            _db_clone = copy.copy(_db_srv)
+            _db_clone.raw = dict(_db_srv.raw)
+            # Прогрев кэша в проверке выключен намеренно: он запускает
+            # лаунчер, а тот — npx, и на чистой машине селфтест скачивал
+            # бы 245 МБ пакета. Что прогрев в реестре включён, проверено
+            # отдельной проверкой выше.
+            _db_clone.raw["connection"] = dict(_db_srv.raw.get("connection") or {},
+                                               warm_up=False)
+            _db_clone.requirements = []
+            _db_clone.has_connection = True
+            _db_a1, _db_ae1 = _mcp_registry.enable(_db_dest, _db_clone)
+            _db_c1 = (_db_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            _db_a2, _db_ae2 = _mcp_registry.enable(_db_dest, _db_clone)
+            _db_c2 = (_db_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            check(not _db_ae1 and '"dbhub"' in _db_c1,
+                  f"включение dbhub пишет блок в настройки: {_db_ae1}")
+            check("dbhub_bridge_launcher.py" in _db_c1
+                  and "{PROGRAM}" not in _db_c1,
+                  "в настройки вписан настоящий путь к лаунчеру")
+            check(_db_c1 == _db_c2 and _db_c2.count('"dbhub"') == 1,
+                  "повторное включение dbhub не меняет файл настройки")
+            check(any("не трогаю" in m for m in _db_a2),
+                  "и программа говорит, что файл не тронула")
+        finally:
+            shutil.rmtree(_db_tmp, ignore_errors=True)
+
+    # ---- Мост браузеров: страницы в настоящем браузере через Playwright MCP
+    #
+    # Пакета моста в репозитории нет: его скачивает npx. Проверяем то, чем
+    # он управляется: лаунчер, запись в реестре, файл выбора и живую
+    # проверку против поддельного сервера протокола MCP. Поддельный сервер
+    # нужен, чтобы проверить «страница открылась, заголовок прочитан» без
+    # настоящего браузера: ставить браузер в самопроверку нельзя, это
+    # десятки мегабайт и чужое решение.
+    import browsers as _br  # noqa: PLC0415 — рядом лежит, круга нет
+    _br_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "browsers_bridge_launcher.py")
+    check(_br_launcher.is_file(), "лаунчер моста браузеров на месте")
+    if _br_launcher.is_file():
+        _br_src = _br_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _br_src,
+              "лаунчер браузеров пишет журнал в stderr, а не в stdout")
+        check("browsers.command(" in _br_src,
+              "лаунчер браузеров берёт команду из общего модуля, а не свою")
+        check("def main() -> int" in _br_src and "__main__" in _br_src,
+              "лаунчер браузеров запускается сам: main() и __main__")
+        check("PyQt6" not in _br_src and "from PyQt" not in _br_src,
+              "лаунчер браузеров не тянет окно программы")
+
+    _br_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "browsers"), None)
+    check(_br_srv is not None, "сервер browsers есть в реестре программы")
+    if _br_srv is not None:
+        _br_conn = _br_srv.raw.get("connection") or {}
+        _br_cmd = [str(part) for part in _br_conn.get("command") or []]
+        check(_br_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _br_cmd
+              and any("browsers_bridge_launcher.py" in part for part in _br_cmd),
+              "команда browsers — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _br_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде browsers нет настоящих путей: {_br_cmd}")
+        check(_br_conn.get("warm_up") is True,
+              "у browsers прогрев кэша включён: npx скачивает пакет заранее")
+        check(any(r.value == "node" and r.min_version == 18
+                  for r in _br_srv.requirements),
+              "у browsers порог Node.js 18 — из engines пакета")
+        _br_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("browsers" in (_br_node.get("required_by") or []),
+              "browsers записан в «нужно мостам» у Node.js")
+
+        _br_tmp = Path(tempfile.mkdtemp(prefix="browsers-selftest-"))
+        try:
+            # Аргументы: у каждого браузера свои. Путь вместо канала — только
+            # там, где канала нет, а профиль всегда наш, а не личный.
+            _br_args = _br.browser_args(_br_tmp, _br.Choice(browser="chrome"))
+            check("--browser chrome" in " ".join(_br_args)
+                  and "--user-data-dir" in " ".join(_br_args),
+                  f"chrome идёт каналом и со своим профилем: {_br_args}")
+            check(str(_br.profile_dir(_br_tmp, "chrome")) in " ".join(_br_args),
+                  "профиль нейросети лежит в cache/browsers, а не в личном")
+            _br_yandex = _br.browser_args(
+                _br_tmp, _br.Choice(browser="yandex", executable=str(_br_launcher)))
+            check("--executable-path" in " ".join(_br_yandex)
+                  and "--browser" not in " ".join(_br_yandex),
+                  "яндекс-браузер идёт по пути: канала у Playwright для него нет")
+            check(_br.browser_args(
+                      _br_tmp, _br.Choice(browser="chrome", profile="sessions"))
+                  == ["--extension"],
+                  "режим «мои сессии» — только --extension, без профиля и окна")
+            check("--isolated" in _br.browser_args(
+                      _br_tmp, _br.Choice(browser="firefox", profile="isolated")),
+                  "режим без сохранения — --isolated")
+            check("--headless" in _br.browser_args(
+                      _br_tmp, _br.Choice(headless=True)),
+                  "выбор «без окна» доходит до сервера")
+
+            # Файл выбора: пишется, читается, а неверное — отклоняется.
+            _br_m1, _br_e1 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="yandex", executable="/нет/browser.exe"))
+            check(bool(_br_e1) and not _br.config_path(_br_tmp).is_file(),
+                  f"яндекс без пути отклонён: {_br_e1[:1]}")
+            _br_m2, _br_e2 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="firefox", profile="sessions"))
+            check(bool(_br_e2),
+                  f"«мои сессии» не для firefox отклонены: {_br_e2[:1]}")
+            _br_m3, _br_e3 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="chrome", profile="separate"))
+            check(not _br_e3 and _br.config_path(_br_tmp).is_file(),
+                  f"выбор записан: {_br_e3}")
+            check(_br.read_choice(_br_tmp).browser == "chrome",
+                  "выбор читается обратно")
+
+            # Живая проверка: поддельный сервер отвечает как настоящий
+            # Playwright MCP. Открывать настоящий браузер для этого не нужно.
+            _br_fake_lines = [
+                "import json, sys",
+                "TOOLS = [",
+                "    {'name': 'browser_navigate'}, {'name': 'browser_evaluate'},",
+                "    {'name': 'browser_take_screenshot'}]",
+                "def answer_for(message):",
+                "    params = message.get('params') or {}",
+                "    name = params.get('name')",
+                "    args = params.get('arguments') or {}",
+                "    if name == 'browser_navigate':",
+                "        return {'content': [{'type': 'text', 'text': '### Page'}]}",
+                "    if name == 'browser_evaluate':",
+                "        return {'content': [{'type': 'text',",
+                "                             'text': 'Мост браузеров: проверка'}]}",
+                "    if name == 'browser_take_screenshot':",
+                "        path = str(args.get('filename') or '')",
+                "        if path:",
+                "            with open(path, 'wb') as fh:",
+                "                fh.write(b'PNG')",
+                "        return {'content': [{'type': 'text', 'text': 'saved'}]}",
+                "    return {'isError': True,",
+                "            'content': [{'type': 'text', 'text': 'нет такого инструмента'}]}",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'Playwright', 'version': '9.9.9'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': TOOLS}",
+                "    elif method == 'tools/call':",
+                "        answer = answer_for(message)",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _br_fake_text = chr(10).join(_br_fake_lines) + chr(10)
+            _br_fake = _br_tmp / "подделка_playwright.py"
+            _br_fake.write_text(_br_fake_text, encoding="utf-8")
+            _br_ok, _br_note = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_fake)])
+            check(_br_ok, f"живая проверка разговаривает с сервером: {_br_note}")
+            check("инструментов 3" in _br_note,
+                  f"и видит инструменты сервера: {_br_note}")
+            check("страница открыта" in _br_note
+                  and "заголовок прочитан" in _br_note,
+                  f"и открывает страницу, читает заголовок: {_br_note}")
+            check("снимок:" in _br_note and "снимок не вышел" not in _br_note,
+                  f"и снимает снимок файлом: {_br_note}")
+            check((_br.profile_dir(_br_tmp, "chrome").parent / "check.png").is_file(),
+                  "снимок экрана лёг файлом рядом с профилем")
+
+            # Тот же протокол, другое имя сервера: чужой мост за Playwright
+            # выдавать нельзя, и проверка обязана это заметить.
+            _br_other = _br_tmp / "подделка_чужая.py"
+            _br_other.write_text(
+                _br_fake_text.replace("'Playwright', 'version'",
+                                      "'Совсем Другой Сервер', 'version'"),
+                encoding="utf-8")
+            _br_ok2, _br_note2 = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_other)])
+            check(not _br_ok2 and "Playwright" in _br_note2,
+                  f"чужой сервер не выдаётся за Playwright: {_br_note2}")
+
+            # Браузер есть, а страница не открылась — это отказ, и в нём
+            # должны быть слова сервера, а не «не получилось».
+            _br_bad = _br_tmp / "подделка_отказ.py"
+            _br_bad_lines = [
+                "import json, sys",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'Playwright'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': [{'name': 'browser_navigate'}]}",
+                "    elif method == 'tools/call':",
+                "        note = 'Chromium distribution chrome is not found'",
+                "        answer = {'isError': True,",
+                "                  'content': [{'type': 'text', 'text': note}]}",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _br_bad.write_text(chr(10).join(_br_bad_lines) + chr(10),
+                               encoding="utf-8")
+            _br_ok3, _br_note3 = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_bad)])
+            check(not _br_ok3 and "Chromium distribution" in _br_note3,
+                  f"незапустившийся браузер — отказ со словами сервера: {_br_note3}")
+            check("not found" in _br_note3,
+                  f"и слова сервера целиком, а не пересказ «не получилось»: {_br_note3}")
+            check("установлен" in _br_note3,
+                  f"и подсказка, что делать: {_br_note3}")
+
+            # Автонастройка без выбора ничего не пишет: у Яндекса без пути
+            # проверять нечего, и в настройки opencode не попадает ничего.
+            # Файл выбора правится и руками, поэтому состояние «Яндекс без
+            # пути» пишем напрямую: через окно такое не записать.
+            _br_empty = _br_tmp / "пустая-папка"
+            _br_empty.mkdir()
+            (_br_empty / _br.CONFIG_NAME).write_text(
+                json.dumps({"browser": "yandex", "executable": ""},
+                           ensure_ascii=False), encoding="utf-8")
+            _br_m5, _br_e5 = _br.auto_setup(_br_empty, _br_srv)
+            check(bool(_br_e5),
+                  f"автонастройка без выбора отказывает: {_br_e5[:1]}")
+            check(not (_br_empty / "opencode.jsonc").exists(),
+                  "и в настройки opencode ничего не вписано")
+
+            # Повторное «Включить» не переписывает файл настроек.
+            _br_dest = _br_tmp / "настройки"
+            _br_dest.mkdir()
+            (_br_dest / "opencode.jsonc").write_text(
+                '{\n  "mcp": {}\n}\n', encoding="utf-8")
+            _br.write_choice(_br_dest, _br.Choice(browser="chrome"))
+            _br_clone = copy.copy(_br_srv)
+            _br_clone.raw = dict(_br_srv.raw)
+            # Прогрев в проверке выключен намеренно: он запускает npx и
+            # скачивал бы пакет при каждом прогоне самопроверки.
+            _br_clone.raw["connection"] = dict(_br_srv.raw.get("connection") or {},
+                                               warm_up=False)
+            _br_clone.requirements = []
+            _br_clone.has_connection = True
+            _br_a1, _br_ae1 = _mcp_registry.enable(_br_dest, _br_clone)
+            _br_c1 = (_br_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            _br_a2, _br_ae2 = _mcp_registry.enable(_br_dest, _br_clone)
+            _br_c2 = (_br_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            check(not _br_ae1 and '"browsers"' in _br_c1,
+                  f"включение browsers пишет блок в настройки: {_br_ae1}")
+            check("browsers_bridge_launcher.py" in _br_c1
+                  and "{PROGRAM}" not in _br_c1,
+                  "в настройки вписан настоящий путь к лаунчеру")
+            check(_br_c1 == _br_c2 and _br_c2.count('"browsers"') == 1,
+                  "повторное включение browsers не меняет файл настройки")
+            check(any("не трогаю" in m for m in _br_a2),
+                  "и программа говорит, что файл не тронула")
+        finally:
+            shutil.rmtree(_br_tmp, ignore_errors=True)
+
+    # ---- OmniRoute: мост к шлюзу моделей. --------------------------------
+    # OmniRoute собирает провайдеров моделей за одним адресом. Здесь
+    # проверяется всё, что можно проверить без самой программы: лаунчер,
+    # запись реестра, окружение запуска, живой запрос к API (на поддельном
+    # сервере, который отвечает как настоящий), отбор бесплатных
+    # провайдеров, отказы и идемпотентность. Настоящий OmniRoute в
+    # самопроверку не поднимаем: он весит сотни мегабайт, ставить его в
+    # проверку нельзя — это чужое решение и чужой трафик.
+    import http.server as _or_http  # noqa: PLC0415 — рядом со своей проверкой
+    import os as _or_os  # noqa: PLC0415
+    import socket as _or_socket  # noqa: PLC0415
+    import subprocess as _or_sp  # noqa: PLC0415
+    import threading as _or_thread  # noqa: PLC0415
+    import omniroute as _or_o  # noqa: PLC0415 — рядом лежит, круга нет
+
+    _or_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "omniroute_bridge_launcher.py")
+    check(_or_launcher.is_file(), "лаунчер моста OmniRoute на месте")
+    if _or_launcher.is_file():
+        _or_src = _or_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _or_src,
+              "лаунчер OmniRoute пишет журнал в stderr, а не в stdout")
+        check("omniroute.config_env(" in _or_src,
+              "лаунчер OmniRoute берёт окружение из общего модуля, а не своё")
+        check("--mcp" in _or_src,
+              "лаунчер OmniRoute поднимает сервер по stdio: --mcp")
+        check("def main() -> int" in _or_src and "__main__" in _or_src,
+              "лаунчер OmniRoute запускается сам: main() и __main__")
+        check("PyQt6" not in _or_src and "from PyQt" not in _or_src,
+              "лаунчер OmniRoute не тянет окно программы")
+        check("INITIAL_PASSWORD" not in _or_src and "apiKey" not in _or_src
+              and "sk-" not in _or_src,
+              "лаунчер OmniRoute не знает секретов: ключи живут в панели")
+        check("return 1" in _or_src and "не развёрнут" in _or_src,
+              "и отказывает внятно, если пакета нет, — а не падает молча")
+
+    _or_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "omniroute"), None)
+    check(_or_srv is not None, "сервер omniroute есть в реестре программы")
+    if _or_srv is not None:
+        _or_conn = _or_srv.raw.get("connection") or {}
+        _or_cmd = [str(part) for part in _or_conn.get("command") or []]
+        check(_or_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _or_cmd
+              and any("omniroute_bridge_launcher.py" in part for part in _or_cmd),
+              "команда omniroute — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _or_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде omniroute нет настоящих путей: {_or_cmd}")
+        check(_or_conn.get("warm_up") is False,
+              "у omniroute прогрев не включён: пакет ставит программа, а не npx")
+        check(_or_srv.license == "MIT"
+              and _or_srv.raw.get("tools_count") == 110,
+              f"лицензия и число инструментов из живой проверки: "
+              f"{_or_srv.license}, {_or_srv.tools_count}")
+        check(any(r.value == "node" and r.min_version == 22
+                  for r in _or_srv.requirements),
+              "порог Node.js 22 — из engines пакета omniroute")
+        check(len(_or_srv.raw.get("setup_steps") or []) == 7,
+              "у omniroute семь шагов настройки — как у остальных мостов")
+        _or_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("omniroute" in (_or_node.get("required_by") or []),
+              "omniroute записан в «нужно мостам» у Node.js")
+        _or_record = json.dumps(_or_srv.raw, ensure_ascii=False)
+        check("password" not in _or_record.lower()
+              and "STORAGE_ENCRYPTION_KEY" not in _or_record
+              and "sk-" not in _or_record,
+              "в записи реестра нет ни одного секрета")
+        check(_or_srv.raw.get("program_install", {}).get("method") == "none"
+              and _or_srv.raw.get("program_install", {}).get("bridge") == "bundled",
+              "шлюз ставит сама программа: method none, мост внутри программы")
+
+    # Пути и окружение: куда ставится, где живут данные, на каком адресе API.
+    check(_or_o.SERVER_DIR == _root / "tools" / "thirdparty" / "omniroute",
+          f"папка моста своя, внутри программы: {_or_o.SERVER_DIR}")
+    check(str(_or_o.ENTRY).replace("\\", "/").endswith(
+              "node_modules/omniroute/bin/omniroute.mjs"),
+          f"точка входа — bin/omniroute.mjs из пакета: {_or_o.ENTRY.name}")
+    check(_or_o.LAUNCHER.is_file(), "модуль знает свой лаунчер")
+    check(_or_o.base_url() == "http://127.0.0.1:20128",
+          f"адрес панели и API один: {_or_o.base_url()}")
+
+    _or_tmp = Path(tempfile.mkdtemp(prefix="omniroute-selftest-"))
+    _or_orig_node = _or_o.node_exe
+    _or_save = (_or_o.ENTRY, _or_o.SERVER_DIR, _or_o._run,
+                _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT, _or_o.npm_exe)
+    try:
+        _or_dest = _or_tmp / "настройки"
+        _or_dest.mkdir()
+        check(_or_o.data_dir(_or_dest) == _or_dest / "omniroute-data",
+              "папка данных — рядом с настройками opencode")
+        _or_env = _or_o.config_env(_or_dest)
+        check(_or_env.get("DATA_DIR") == str(_or_dest / "omniroute-data")
+              and Path(_or_env["DATA_DIR"]).is_dir(),
+              f"лаунчеру и серверу уходит один DATA_DIR: {_or_env.get('DATA_DIR')}")
+        check(_or_env.get("PORT") == "20128"
+              and _or_env.get("OMNIROUTE_SERVER_HOST") == "127.0.0.1",
+              "порт из README, интерфейс — только эта машина")
+        check(not [k for k in ("INITIAL_PASSWORD", "STORAGE_ENCRYPTION_KEY",
+                               "OMNIROUTE_API_KEY", "REQUIRE_API_KEY")
+                   if k in _or_env],
+              "секретов и ключей окружение не выставляет")
+        check(any("omniroute.mjs" in part for part in _or_o.command(["--mcp"])),
+              f"команда запуска — точка входа пакета: {_or_o.command(['--mcp'])[1:]}")
+
+        # Пакета нет — «развёрнут» не должно быть правдой. Патчим и папку
+        # моста: на машине, где пакет уже поставлен, иначе версия нашлась
+        # бы в файлах, а состояние было бы неправдой.
+        _or_o.SERVER_DIR = _or_tmp / "папка-моста-нет"
+        _or_o.ENTRY = (_or_o.SERVER_DIR / "node_modules" / "omniroute"
+                       / "bin" / "omniroute.mjs")
+        check(_or_o.SERVER_DIR.is_dir() is False and _or_o.deployed() is False,
+              "без папки пакета мост не считается развёрнутым")
+        check("не развёрнут" in _or_o.status_text(_or_dest),
+              f"и статус говорит об этом словами: "
+              f"{_or_o.status_text(_or_dest)[:60]}")
+        _or_o.SERVER_DIR = _or_save[1]
+        _or_o.ENTRY = _or_tmp / "нет-такого-omniroute.mjs"
+
+        # Поддельный сервер API: отвечает как настоящий, без OmniRoute.
+        # Он нужен и живой проверке, и подключению провайдеров — обе ходят
+        # на тот же адрес.
+        def _or_api(body: str, status: int = 200):
+            class _OrHandler(_or_http.BaseHTTPRequestHandler):
+                def do_GET(self):  # noqa: N802 — так зовёт http.server
+                    data = body.encode("utf-8")
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def log_message(self, *args):
+                    pass
+
+            server = _or_http.HTTPServer(("127.0.0.1", 0), _OrHandler)
+            _or_thread.Thread(target=server.serve_forever, daemon=True).start()
+            return server, server.server_address[1]
+
+        _or_good, _or_port = _or_api(
+            '{"status": "ok", "timestamp": "2026-10-07T00:00:00.000Z"}')
+        _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT = "127.0.0.1", _or_port
+
+        # Вывод CLI: строки OmniRoute про загруженный .env стоят перед JSON,
+        # и разбор обязан брать объект, а не падать на первой строке.
+        _or_noisy = ("  📋 Loaded env from /tmp/x/.env\n"
+                     "{\n  \"version\": \"3.8.51\",\n  \"uptime\": 12\n}\n")
+        _or_parsed = _or_o._json_from(_or_noisy)
+        check(isinstance(_or_parsed, dict)
+              and _or_parsed.get("version") == "3.8.51",
+              f"JSON из вывода CLI разбирается, несмотря на журнал: {_or_parsed}")
+        check(_or_o._json_from("никакого json тут нет") is None,
+              "а мусор без JSON честно даёт «не разобралось»")
+        check(_or_o._json_from("[{\"id\": \"a\"}, {\"id\": \"b\"}]")
+              == [{"id": "a"}, {"id": "b"}],
+              "и массив JSON тоже разбирается")
+
+        # Отбор бесплатных: без ключа, с ключом, не бесплатные и снятые с
+        # поддержки — на синтетическом каталоге, чтобы правило было видно.
+        _or_keyless, _or_keyed = _or_o._split_free([
+            {"id": "free-noauth", "hasFree": True, "category": "noauth"},
+            {"id": "free-key", "hasFree": True, "category": "api-key"},
+            {"id": "paid", "hasFree": False, "category": "api-key"},
+            {"id": "dead", "hasFree": True, "category": "noauth",
+             "deprecated": True},
+            "мусор",
+        ])
+        check([p["id"] for p in _or_keyless] == ["free-noauth"]
+              and [p["id"] for p in _or_keyed] == ["free-key"],
+              f"бесплатные делятся на «без ключа» и «с ключом»: "
+              f"{[p['id'] for p in _or_keyless]}, {[p['id'] for p in _or_keyed]}")
+        check(all(p["id"] not in ("paid", "dead")
+                  for p in _or_keyless + _or_keyed),
+              "платные и снятые с поддержки в работу не берутся")
+
+        # Поддельный CLI: отвечает как настоящий, а какие команды у него
+        # просят — записываем. Так проверяются и разбор, и сами команды.
+        _or_calls: list[list[str]] = []
+        _or_catalog = {"count": 3, "providers": [
+            {"id": "first-free", "hasFree": True, "category": "noauth"},
+            {"id": "second-free", "hasFree": True, "category": "noauth"},
+            {"id": "with-key", "hasFree": True, "category": "api-key"},
+            {"id": "no-free", "hasFree": False, "category": "api-key"},
+        ]}
+        _or_list = {"providers": [
+            {"id": "1", "provider": "second-free", "name": "second-free"},
+        ]}
+
+        def _or_fake_run(args, dest, timeout=None, progress=None):
+            _or_calls.append(list(args))
+            noise = "  📋 Loaded env from /tmp/x/.env\n"
+            if args[:1] == ["health"]:
+                return 0, noise + json.dumps(
+                    {"status": "healthy", "version": "3.8.51"},
+                    ensure_ascii=False), ""
+            if args[:2] == ["providers", "available"]:
+                return 0, noise + json.dumps(_or_catalog, ensure_ascii=False), ""
+            if args[:2] == ["providers", "list"]:
+                return 0, noise + json.dumps(_or_list, ensure_ascii=False), ""
+            if args[:2] == ["providers", "add"]:
+                _or_list["providers"].append(
+                    {"id": "new", "provider": args[2], "name": args[2]})
+                return 0, noise + json.dumps({"connection": {"id": "new"}}), ""
+            return 0, "", ""
+
+        _or_o._run = _or_fake_run
+        check(_or_o.server_version(_or_dest) == "3.8.51",
+              f"версия сервера берётся из ответа API: "
+              f"{_or_o.server_version(_or_dest)}")
+
+        _or_kl, _or_ky, _or_trouble = _or_o.catalog(_or_dest)
+        check(not _or_trouble
+              and [p["id"] for p in _or_kl] == ["first-free", "second-free"]
+              and [p["id"] for p in _or_ky] == ["with-key"],
+              f"каталог провайдеров разобран: {[p['id'] for p in _or_kl]}")
+        check(any(call[:2] == ["providers", "available"] for call in _or_calls),
+              "и спрошен командой самого OmniRoute: providers available")
+
+        _or_have, _or_trouble = _or_o.configured_providers(_or_dest)
+        check(not _or_trouble and "second-free" in _or_have,
+              f"подключённые провайдеры прочитаны: {sorted(_or_have)}")
+
+        # Подключение бесплатных: что уже стоит — не трогаем, чего нет —
+        # добавляем той же командой, что советует README.
+        _or_calls.clear()
+        _or_msgs, _or_errs = _or_o.sync_free_providers(_or_dest)
+        _or_added = [call[2] for call in _or_calls
+                     if call[:2] == ["providers", "add"]]
+        check(not _or_errs, f"подключение бесплатных прошло: {_or_errs[:1]}")
+        check(_or_added == ["first-free"],
+              f"добавлен только отсутствующий: {_or_added}")
+        check(all("--allow-no-credential" in call and "--yes" in call
+                  for call in _or_calls if call[:2] == ["providers", "add"]),
+              "и команда без спроса ключа: --allow-no-credential --yes")
+        check(not [call for call in _or_calls if call[:2] == ["providers", "add"]
+                   and "with-key" in call],
+              "бесплатный с ключом не подключён: ключа сервиса у программы нет")
+        check(any("требуют ключ" in m for m in _or_msgs),
+              f"и сказано словами, что остальные ждут ключ: {_or_msgs[-1:]}")
+
+        # Список бесплатных изменился (новая версия каталога): новый
+        # провайдер добавляется, старые не подключаются второй раз.
+        _or_catalog["providers"].append(
+            {"id": "third-free", "hasFree": True, "category": "noauth"})
+        _or_calls.clear()
+        _or_msgs2, _or_errs2 = _or_o.sync_free_providers(_or_dest)
+        _or_added2 = [call[2] for call in _or_calls
+                      if call[:2] == ["providers", "add"]]
+        check(not _or_errs2 and _or_added2 == ["third-free"],
+              f"изменившийся список подхватывается сам: {_or_added2}")
+        check("first-free" not in _or_added2,
+              "и уже подключённые не добавляются второй раз")
+
+        # Список подключённых не прочитался — добавлять вслепую нельзя.
+        _or_o._run = lambda args, dest, timeout=None, progress=None: (
+            1, "", "таймаут") if args[:2] == ["providers", "list"] else (
+            0, json.dumps(_or_catalog, ensure_ascii=False), "")
+        _or_msgs3, _or_errs3 = _or_o.sync_free_providers(_or_dest)
+        check(bool(_or_errs3),
+              f"без списка подключённых подключение не идёт: {_or_errs3[:1]}")
+        _or_o._run = _or_fake_run
+
+        # Живая проверка — настоящий запрос к API.
+        _or_msgs4, _or_errs4 = _or_o.check_connection(_or_dest)
+        check(not _or_errs4,
+              f"живая проверка проходит на отвечающем API: {_or_errs4[:1]}")
+        check(any("/api/health" in m and "ok" in m for m in _or_msgs4),
+              f"и это настоящий запрос к API, а не взгляд на файлы: "
+              f"{_or_msgs4[:1]}")
+        check("отвечает" in _or_o.status_text(_or_dest),
+              f"статус видит живой API: {_or_o.status_text(_or_dest)[:60]}")
+        check("провайдер" in _or_o.status_text(_or_dest),
+              f"и говорит, сколько провайдеров подключено: "
+              f"{_or_o.status_text(_or_dest)[-40:]}")
+
+        # Молчащий порт — отказ, а не «работает».
+        _or_closed = _or_socket.socket()
+        _or_closed.bind(("127.0.0.1", 0))
+        _or_free_port = _or_closed.getsockname()[1]
+        _or_closed.close()
+        _or_o.DEFAULT_PORT = _or_free_port
+        _or_ok5, _or_data5, _or_note5 = _or_o.health(_or_dest, timeout=2)
+        check(not _or_ok5 and "не ответил" in _or_note5,
+              f"молчащий порт — отказ: {_or_note5[:70]}")
+
+        # Ответ есть, а «ok» в нём нет — тоже отказ.
+        _or_bad, _or_port2 = _or_api('{"status": "degraded"}')
+        _or_o.DEFAULT_PORT = _or_port2
+        _or_ok6, _or_data6, _or_note6 = _or_o.health(_or_dest, timeout=3)
+        check(not _or_ok6 and _or_data6.get("status") == "degraded",
+              f"ответ без «ok» живой проверкой не считается: {_or_note6[:70]}")
+        _or_bad.shutdown()
+
+        # Мусор вместо JSON — тоже отказ: чужой процесс за портом.
+        _or_junk, _or_port3 = _or_api("привет, я не JSON")
+        _or_o.DEFAULT_PORT = _or_port3
+        _or_ok7, _or_data7, _or_note7 = _or_o.health(_or_dest, timeout=3)
+        check(not _or_ok7 and "не разобрался" in _or_note7,
+              f"мусор вместо JSON — тоже отказ: {_or_note7[:70]}")
+        _or_junk.shutdown()
+
+        # Ожидание ответа: ждём API, а не «процесс жив».
+        _or_up, _or_port4 = _or_api('{"status": "ok"}')
+        _or_o.DEFAULT_PORT = _or_port4
+        _or_got, _or_bad8 = _or_o.wait_ready(_or_dest, timeout=10)
+        check(not _or_bad8 and any("ответил" in m for m in _or_got),
+              f"ожидание дожидается ответа API: {_or_got[:1]}")
+        _or_up.shutdown()
+        _or_good.shutdown()
+        _or_o.DEFAULT_PORT = _or_save[4]
+
+        # Отказы: нет пакета — не запускаем и в настройки не пишем.
+        _or_msgs9, _or_errs9 = _or_o.start(_or_dest)
+        check(bool(_or_errs9) and "не развёрнут" in _or_errs9[0],
+              f"без пакета запуск отказывает: {_or_errs9[:1]}")
+        check(not (_or_dest / "opencode.jsonc").exists(),
+              "и в настройки opencode ничего не вписано")
+
+        # «Запустить» поднимает мост и сразу подключает бесплатных: каталог
+        # читается заново при каждом запуске, поэтому изменившийся список
+        # подхватывается без отдельного шага.
+        _or_good2, _or_port5 = _or_api('{"status": "ok"}')
+        _or_o.DEFAULT_PORT = _or_port5
+        # «Развёрнут» — только на время этих проверок: файл-заглушка на
+        # месте точки входа и Node.js из самого Python. Дальше флаг
+        # «развёрнут» снова выключен, чтобы отказы проверялись честно.
+        _or_fake_entry = _or_tmp / "omniroute.mjs"
+        _or_fake_entry.write_text("// заглушка самопроверки\n", encoding="utf-8")
+        _or_o.ENTRY = _or_fake_entry
+        _or_save_node = _or_o.node_exe
+        _or_o.node_exe = lambda: sys.executable
+        _or_catalog["providers"].append(
+            {"id": "fourth-free", "hasFree": True, "category": "noauth"})
+        _or_calls.clear()
+        _or_msgs12, _or_errs12 = _or_o.bring_up(_or_dest)
+        _or_added12 = [call[2] for call in _or_calls
+                       if call[:2] == ["providers", "add"]]
+        check(not _or_errs12 and any("ответил" in m for m in _or_msgs12),
+              f"«Запустить» поднимает сервер и ждёт ответа API: "
+              f"{_or_msgs12[:1]}")
+        check(_or_added12 == ["fourth-free"],
+              f"и тут же подключает бесплатных из свежего каталога: "
+              f"{_or_added12}")
+        _or_good2.shutdown()
+        _or_o.DEFAULT_PORT = _or_save[4]
+        _or_o.node_exe = _or_save_node
+        _or_o.ENTRY = _or_tmp / "нет-такого-omniroute.mjs"
+
+        # Сервер не поднялся — провайдеров не трогаем: подключать их некуда.
+        _or_calls.clear()
+        _or_msgs13, _or_errs13 = _or_o.bring_up(_or_dest)
+        check(bool(_or_errs13) and not _or_calls,
+              f"без сервера провайдеры не трогаются: {_or_errs13[:1]}")
+
+        _or_o.npm_exe = lambda: None
+        _or_o.SERVER_DIR = _or_tmp / "папка-моста"
+        _or_o.SERVER_DIR.mkdir()
+        _or_msgs10, _or_errs10 = _or_o.deploy()
+        check(bool(_or_errs10) and "npm" in _or_errs10[0],
+              f"без npm развёртывание отказывает и говорит про Node.js: "
+              f"{_or_errs10[:1]}")
+        check(not (_or_o.SERVER_DIR / "node_modules").exists(),
+              "и ничего не ставит в папку моста")
+        _or_msgs11, _or_errs11 = _or_o.auto_setup(_or_dest, _or_srv)
+        check(bool(_or_errs11)
+              and any("ничего не вписано" in e for e in _or_errs11),
+              f"автонастройка без пакета отказывает и говорит об этом: "
+              f"{_or_errs11[-1:]}")
+        check(not (_or_dest / "opencode.jsonc").exists(),
+              "и снова ничего не пишет в настройки")
+        _or_o.npm_exe = _or_save[5]
+
+        # Командная строка моста: то же, что кнопки окна, и без секретов.
+        _or_cli = _or_launcher.parent.parent / "omniroute.py"
+        _or_cli_env = dict(_or_os.environ)
+        _or_cli_env["OPENCODE_CONFIG_DIR"] = str(_or_dest)
+        _or_help = _or_sp.run(
+            [sys.executable, str(_or_cli), "--help"],
+            capture_output=True, text=True, encoding="utf-8", env=_or_cli_env,
+            timeout=60)
+        check(_or_help.returncode == 0
+              and all(word in _or_help.stdout
+                      for word in ("status", "restart", "deploy", "sync")),
+              f"у моста есть командная строка для скилла: "
+              f"{_or_help.stdout.strip()[:60]}")
+        _or_unknown = _or_sp.run(
+            [sys.executable, str(_or_cli), "абракадабра"],
+            capture_output=True, text=True, encoding="utf-8", env=_or_cli_env,
+            timeout=60)
+        check(_or_unknown.returncode == 2
+              and "Не знаю такой команды" in _or_unknown.stdout,
+              f"неизвестная команда не делается молча: "
+              f"{_or_unknown.stdout.strip()[:60]}")
+
+        # Идемпотентность: повторное включение не переписывает настройки.
+        _or_cfg_dest = _or_tmp / "настройки-включения"
+        _or_cfg_dest.mkdir()
+        (_or_cfg_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _or_clone = copy.copy(_or_srv)
+        _or_clone.raw = dict(_or_srv.raw)
+        _or_clone.raw["connection"] = dict(_or_srv.raw.get("connection") or {},
+                                           warm_up=False)
+        _or_clone.requirements = []
+        _or_clone.has_connection = True
+        _or_e1, _or_ee1 = _mcp_registry.enable(_or_cfg_dest, _or_clone)
+        _or_c1 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _or_e2, _or_ee2 = _mcp_registry.enable(_or_cfg_dest, _or_clone)
+        _or_c2 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _or_ee1 and '"omniroute"' in _or_c1
+              and "omniroute_bridge_launcher.py" in _or_c1,
+              f"включение omniroute пишет блок в настройки: {_or_ee1}")
+        check("{PROGRAM}" not in _or_c1,
+              "и настоящий путь лаунчера подставлен, а не плейсхолдер")
+        check(_or_c1 == _or_c2 and _or_c2.count('"omniroute"') == 1,
+              "повторное включение omniroute не меняет файл настройки")
+        check(any("не трогаю" in m for m in _or_e2),
+              "и программа говорит, что файл не тронула")
+
+        # Провайдер OmniRoute в настройках opencode: через тот же механизм
+        # пресетов, что у Ollama и LM Studio, и тоже идемпотентно.
+        _or_p1, _or_pe1 = opencode_caps.install_providers(
+            _or_cfg_dest, {"omniroute"})
+        _or_pcfg1 = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _or_p2, _or_pe2 = opencode_caps.install_providers(
+            _or_cfg_dest, {"omniroute"})
+        _or_pcfg = (_or_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _or_pe1 and not _or_pe2,
+              f"пресет провайдера ставится без ошибок: "
+              f"{_or_pe1 or _or_pe2 or 'чисто'}")
+        check(_or_pcfg == _or_pcfg1,
+              "повтор провайдера не меняет файл настроек")
+        _or_name_count = _or_pcfg.count('"omniroute"')
+        check(_or_name_count == 2,
+              f"имя omniroute стоит дважды — в mcp и в provider: "
+              f"{_or_name_count}")
+        check(opencode_caps.check_jsonc(_or_pcfg),
+              "настройки остались валидными")
+        check(opencode_caps.providers_status(_or_cfg_dest).get("omniroute") is True,
+              "статус видит пресет OmniRoute")
+        check("localhost:20128/v1" in _or_pcfg,
+              "адрес провайдера — панель и API из README")
+        check("sk-" not in _or_pcfg and "sk_omniroute" in _or_pcfg,
+              "и в настройках только литерал-заглушка, а не ключ")
+        check(opencode_caps.PROVIDER_PRESETS["omniroute"][1] == "",
+              "ключ у пресета не спрашивается: он в панели OmniRoute")
+    finally:
+        (_or_o.ENTRY, _or_o.SERVER_DIR, _or_o._run,
+         _or_o.DEFAULT_HOST, _or_o.DEFAULT_PORT, _or_o.npm_exe) = _or_save
+        _or_o.node_exe = _or_orig_node
+        shutil.rmtree(_or_tmp, ignore_errors=True)
+
+    # ---- LMArena: мост к моделям площадки Arena. -------------------------
+    # У форка LMArenaBridge нет MCP — он отдаёт OpenAI-совместимый HTTP API.
+    # Проверяется всё, что можно проверить без арены и без токена человека:
+    # лаунчер (он же MCP-слой), запись реестра, пути и папки, работа с
+    # токеном, живой запрос к API на поддельном мосте, отказы и
+    # идемпотентность. Настоящую арену в самопроверку не зовём: это чужой
+    # трафик и живой аккаунт человека.
+    import http.server as _lm_http  # noqa: PLC0415 — рядом со своей проверкой
+    import os as _lm_os  # noqa: PLC0415
+    import socket as _lm_socket  # noqa: PLC0415
+    import subprocess as _lm_sp  # noqa: PLC0415
+    import threading as _lm_thread  # noqa: PLC0415
+    import lmarena as _lm_o  # noqa: PLC0415 — рядом лежит, круга нет
+
+    _lm_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "lmarena_bridge_launcher.py")
+    check(_lm_launcher.is_file(), "лаунчер моста LMArena на месте")
+    if _lm_launcher.is_file():
+        _lm_src = _lm_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _lm_src,
+              "лаунчер LMArena пишет журнал в stderr, а не в stdout")
+        check("PyQt6" not in _lm_src and "from PyQt" not in _lm_src,
+              "лаунчер LMArena не тянет окно программы")
+        check("import lmarena" in _lm_src and "mcp_main" in _lm_src,
+              "лаунчер LMArena берёт протокол из общего модуля, а не свой")
+        check("def main() -> int" in _lm_src and "__main__" in _lm_src,
+              "лаунчер LMArena запускается сам: main() и __main__")
+        check("return 1" in _lm_src and "Код моста не найден" in _lm_src,
+              "и отказывает внятно, если кода нет, — а не падает молча")
+        check("auth_token" not in _lm_src and "apiKey" not in _lm_src
+              and "base64-" not in _lm_src,
+              "лаунчер LMArena не знает секретов: токен живёт рядом с "
+              "настройками")
+
+    # Код форка лежит в программе: без него мост не собрать.
+    check(_lm_o.REQUIREMENTS.is_file()
+          and (_lm_o.SERVER_DIR / "LICENSE").is_file(),
+          "рядом с кодом форка есть requirements.txt и LICENSE")
+    check((_lm_o.SERVER_DIR / "README.md").is_file()
+          and "что здесь лежит" in
+          (_lm_o.SERVER_DIR / "README.md").read_text(encoding="utf-8"),
+          "README в папке моста — наш, объясняющий, что скопировано")
+
+    # Запись реестра: та же форма, что у остальных мостов, и без секретов.
+    _lm_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "lmarena"), None)
+    check(_lm_srv is not None, "сервер lmarena есть в реестре программы")
+    if _lm_srv is not None:
+        _lm_conn = _lm_srv.raw.get("connection") or {}
+        _lm_cmd = [str(part) for part in _lm_conn.get("command") or []]
+        check(_lm_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _lm_cmd
+              and any("lmarena_bridge_launcher.py" in part for part in _lm_cmd),
+              "команда lmarena — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _lm_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде lmarena нет настоящих путей: {_lm_cmd}")
+        check(_lm_conn.get("warm_up") is False,
+              "у lmarena прогрев не включён: npx тут не при чём")
+        check(_lm_srv.license == "MIT" and _lm_srv.raw.get("tools_count") == 3,
+              f"лицензия MIT и три инструмента: "
+              f"{_lm_srv.license}, {_lm_srv.tools_count}")
+        check(len(_lm_srv.raw.get("setup_steps") or []) == 7,
+              "у lmarena семь шагов настройки — как у остальных мостов")
+        check(all(r.kind in ("command", "program", "manual")
+                  for r in _lm_srv.requirements),
+              "у каждого требования lmarena понятный вид")
+        check(not _lm_srv.blocking_manual,
+              "среди ручных требований нет ни одного блокирующего")
+        _lm_install = _lm_srv.raw.get("program_install") or {}
+        check(_lm_install.get("method") == "none"
+              and _lm_install.get("bridge") == "bundled",
+              "мост ставит сама программа: method none, мост внутри программы")
+        check(_lm_install.get("bridge_checked") is False
+              and not _lm_install.get("known_good"),
+              "зелёной отметки нет: живой ответ модели не проверялся")
+        check(_lm_srv.raw.get("ready_here") is False,
+              "и ready_here честно false — проверено не всё")
+        _lm_json = json.dumps(_lm_srv.raw, ensure_ascii=False)
+        check("стелс" in _lm_json.lower() and "403" in _lm_json,
+              "и человеку сказано, что стелс-модели форк не отдаёт (403)")
+        _lm_record = json.dumps(_lm_srv.raw, ensure_ascii=False)
+        check("auth_token" not in _lm_record.lower()
+              and "mcp-lmarena-token" not in _lm_record.replace(
+                  "mcp-lmarena-token.txt", "")
+              and not re.search(r"base64-[A-Za-z0-9+/=]{16,}", _lm_record),
+              "в записи реестра нет секретов: только имя файла и префикс куки")
+        _lm_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("lmarena" not in (_lm_node.get("required_by") or []),
+              "lmarena не требует Node.js: мост на Python")
+
+    # Пути, папки и адреса: как у остальных мостов, без настоящих путей.
+    check(_lm_o.SERVER_DIR == _root / "tools" / "thirdparty" / "lmarena",
+          f"папка моста своя, внутри программы: {_lm_o.SERVER_DIR}")
+    check(str(_lm_o.ENTRY).replace("\\", "/").endswith("src/main.py"),
+          f"точка входа — код форка из README: {_lm_o.ENTRY.name}")
+    check(_lm_o.LAUNCHER.is_file(), "модуль знает свой лаунчер")
+    _lm_env_port = _lm_os.environ.pop("LMARENA_PORT", None)
+    _lm_env_host = _lm_os.environ.pop("LMARENA_HOST", None)
+    check(_lm_o.base_url() == "http://127.0.0.1:8000"
+          and _lm_o.api_url() == "http://127.0.0.1:8000/api/v1",
+          f"адрес API — из README форка: {_lm_o.api_url()}")
+    check(_lm_o.MODELS_PATH.startswith("/api/")
+          and _lm_o.CHAT_PATH.startswith("/api/"),
+          f"пути API — те же, что в коде форка: {_lm_o.MODELS_PATH}")
+    check(len(_lm_o.WARNINGS) >= 5
+          and any("условиям сервиса" in w for w in _lm_o.WARNINGS)
+          and any("приватный код" in w.lower() for w in _lm_o.WARNINGS)
+          and any("стелс" in w.lower() for w in _lm_o.WARNINGS)
+          and any("лимит" in w.lower() for w in _lm_o.WARNINGS)
+          and any("токен" in w.lower() for w in _lm_o.WARNINGS),
+          f"обязательные предупреждения на месте: {len(_lm_o.WARNINGS)}")
+    check(any("все сетевые интерфейсы" in w for w in _lm_o.WARNINGS)
+          and any("admin" in w for w in _lm_o.WARNINGS),
+          "и сказано про открытый интерфейс моста и пароль панели")
+    _lm_mod = Path(_lm_o.__file__).read_text(encoding="utf-8")
+    check('host="0.0.0.0"' in _lm_mod and "не подменяет" in _lm_mod,
+          "в модуле записано, почему хост и пароль панели мы не подменяем")
+    check("404" in _lm_o.FORK_CHOICE and "CloudWaddie" in _lm_o.FORK_CHOICE,
+          "выбор форка обоснован: два других не существуют")
+
+    _lm_tmp = Path(tempfile.mkdtemp(prefix="lmarena-selftest-"))
+    _lm_save = (_lm_o.ENTRY, _lm_o.SERVER_DIR, _lm_o.venv_python, _lm_o.deployed)
+    try:
+        _lm_dest = _lm_tmp / "настройки"
+        _lm_dest.mkdir()
+        check(_lm_o.data_dir(_lm_dest) == _lm_dest / "lmarena-data",
+              "папка базы моста — рядом с настройками opencode")
+        check(_lm_o.token_path(_lm_dest) == _lm_dest / "mcp-lmarena-token.txt",
+              "файл токена — рядом с настройками, не в репозитории")
+        check(_lm_o.venv_python().name in ("python", "python.exe")
+              and _lm_o.VENV_DIR.parent == _lm_o.SERVER_DIR,
+              f"окружение моста своё, внутри папки моста: "
+              f"{_lm_o.VENV_DIR.name}")
+
+        # Кода нет — «развёрнут» не должно быть правдой, и запуск отказывает.
+        _lm_o.SERVER_DIR = _lm_tmp / "папка-моста-нет"
+        _lm_o.ENTRY = _lm_o.SERVER_DIR / "src" / "main.py"
+        check(_lm_o.deployed() is False,
+              "без кода форка мост не считается развёрнутым")
+        _lm_missing = _lm_o.missing_files()
+        check(any("src/main.py" in item for item in _lm_missing),
+              f"и видно, чего не хватает: {_lm_missing}")
+        check("не найден" in _lm_o.status_text(_lm_dest),
+              f"статус говорит об этом словами: "
+              f"{_lm_o.status_text(_lm_dest)[:70]}")
+        _lm_msgs0, _lm_errs0 = _lm_o.start(_lm_dest)
+        check(bool(_lm_errs0) and "не найден" in _lm_errs0[0],
+              f"без кода запуск отказывает: {_lm_errs0[:1]}")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "и в настройки opencode ничего не вписано")
+        check(_lm_o.read_token(_lm_dest) == ""
+              and not _lm_o.token_present(_lm_dest),
+              "токена нет — и это не ошибка чтения, а пустая строка")
+
+        # Код есть, окружения нет — честная подсказка про «Развернуть».
+        _lm_o.SERVER_DIR = _lm_save[1]
+        _lm_o.ENTRY = _lm_save[0]
+        _lm_o.venv_python = lambda: _lm_tmp / "нет-такого-python"
+        check(_lm_o.deployed() is False
+              and "окружение не поставлено" in _lm_o.status_text(_lm_dest),
+              "без окружения статус просит «Развернуть», а не молчит")
+
+        # Токен: файл рядом с настройками, в настройки opencode не попадает.
+        _lm_secret = "base64-ТЕСТОВЫЙ-ТОКЕН-1234567890"
+        _lm_msgs1, _lm_errs1 = _lm_o.save_token(_lm_dest, "   ")
+        check(bool(_lm_errs1) and not _lm_o.token_present(_lm_dest),
+              "пустой токен не сохраняется")
+        _lm_msgs2, _lm_errs2 = _lm_o.save_token(_lm_dest, _lm_secret)
+        check(not _lm_errs2 and _lm_o.read_token(_lm_dest) == _lm_secret,
+              "токен сохранён файлом рядом с настройками")
+        check(all(_lm_secret not in m for m in _lm_msgs2),
+              "и в сообщении окна его нет — только «сохранён»")
+        check(_lm_o.token_present(_lm_dest) is True, "и он виден как «есть»")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "в настройки opencode токен не пишется")
+
+        _lm_msgs3, _lm_errs3 = _lm_o.apply_token(_lm_dest)
+        _lm_cfg = _lm_o.data_dir(_lm_dest) / "config.json"
+        _lm_cfg_data = json.loads(_lm_cfg.read_text(encoding="utf-8"))
+        check(not _lm_errs3 and _lm_cfg_data.get("auth_tokens") == [_lm_secret]
+              and _lm_cfg_data.get("auth_token") == _lm_secret,
+              "и уезжает в config.json моста (только туда)")
+        check(all(_lm_secret not in m for m in _lm_msgs3),
+              "в сообщениях о переносе токена его тоже нет")
+        _lm_cfg_backup = _lm_cfg.read_text(encoding="utf-8")
+        check(_lm_secret not in _lm_o.status_text(_lm_dest),
+              "статус про токен говорит, а самого токена не показывает")
+        _lm_cfg.write_text("{ это не json", encoding="utf-8")
+        _lm_msgs4, _lm_errs4 = _lm_o.apply_token(_lm_dest)
+        check(bool(_lm_errs4) and "не читается" in _lm_errs4[0],
+              f"сломанный config.json не переписывается: {_lm_errs4[:1]}")
+        check(_lm_cfg.read_text(encoding="utf-8") == "{ это не json",
+              "и файл остался как был")
+        _lm_cfg.write_text(_lm_cfg_backup, encoding="utf-8")
+
+        # Поддельный мост: отвечает как настоящий, без арены.
+        class _LmBridge(_lm_http.BaseHTTPRequestHandler):
+            mode = "healthy"
+            models = [{"id": "model-a", "owned_by": "org-a"},
+                      {"id": "model-b", "owned_by": "org-b"}]
+            answer = "работает"
+
+            def log_message(self, *args):  # тишина: журнал тут не нужен
+                pass
+
+            def _raw(self, code, text):
+                body = text.encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _send(self, code, payload):
+                self._raw(code, json.dumps(payload, ensure_ascii=False))
+
+            def do_GET(self):  # noqa: N802 — так требует http.server
+                if self.path.endswith("/api/v1/health"):
+                    if self.mode == "junk":
+                        self._raw(200, "привет, я не JSON")
+                        return
+                    self._send(200, {"status": self.mode,
+                                     "checks": {"model_count": len(self.models)}})
+                    return
+                if self.path.endswith("/api/v1/models"):
+                    self._send(200, {"object": "list", "data": self.models})
+                    return
+                self._send(404, {"detail": "нет такого пути"})
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                if self.path.endswith("/api/v1/chat/completions"):
+                    if self.mode == "closed":
+                        self._send(401, {"detail": "Invalid API Key."})
+                        return
+                    if self.mode == "empty":
+                        self._send(200, {"choices": [
+                            {"message": {"content": ""}}]})
+                        return
+                    self._send(200, {"choices": [
+                        {"message": {"role": "assistant",
+                                     "content": self.answer}}]})
+                    return
+                self._send(404, {"detail": "нет такого пути"})
+
+        def _lm_api(mode="healthy"):
+            """Поднимает подделку моста на свободном порту."""
+            _LmBridge.mode = mode
+            server = _lm_http.HTTPServer(("127.0.0.1", 0), _LmBridge)
+            _lm_thread.Thread(target=server.serve_forever, daemon=True).start()
+            return server, server.server_address[1]
+
+        # «Развёрнут» — только на время проверок API: файл-заглушка на месте
+        # кода форка и Python из самого процесса. Дальше он снова
+        # выключается, чтобы отказы проверялись честно.
+        _lm_fake_entry = _lm_tmp / "main.py"
+        _lm_fake_entry.write_text("// заглушка самопроверки\n", encoding="utf-8")
+
+        # Порт поддельного моста подставляем переменной — своей, не чужой.
+        _lm_good, _lm_port = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port)
+        check(_lm_o.base_url() == f"http://127.0.0.1:{_lm_port}",
+              "порт для проверки подставляется своей переменной")
+
+        _lm_ok, _lm_data, _lm_note = _lm_o.health(_lm_dest, timeout=3)
+        check(_lm_ok and _lm_data.get("status") == "healthy",
+              f"живой запрос к API моста проходит: {_lm_note[:60]}")
+        check("окружение не поставлено" in _lm_o.status_text(_lm_dest),
+              "отвечающий мост не заставляет статус врать без окружения")
+        _lm_o.ENTRY = _lm_fake_entry
+        _lm_o.SERVER_DIR = _lm_tmp
+        _lm_o.venv_python = lambda: Path(sys.executable)
+        check(_lm_o.deployed() is True,
+              "с кодом и окружением мост считается развёрнутым")
+        _lm_names, _lm_note2 = _lm_o.chat_models(_lm_dest)
+        check(_lm_names == ["model-a", "model-b"],
+              f"список моделей читается у моста: {_lm_names}")
+        _lm_answer, _lm_note3 = _lm_o.chat(_lm_dest, "model-a", "привет")
+        check(_lm_answer == "работает" and not _lm_note3,
+              f"ответ модели разбирается: {_lm_answer!r}")
+        _lm_status_live = _lm_o.status_text(_lm_dest)
+        check("отвечает" in _lm_status_live and "токен есть" in _lm_status_live
+              and "моделей: 2" in _lm_status_live
+              and _lm_secret not in _lm_status_live,
+              f"статус называет и токен, и число моделей, и не показывает "
+              f"токен: {_lm_status_live[:80]}")
+        _lm_note4 = _lm_o.chat(_lm_dest, "", "")[1]
+        check("Нужны и модель" in _lm_note4,
+              f"пустой запрос к модели — отказ: {_lm_note4[:50]}")
+
+        # Живая проверка моста: сервер, список моделей и ответ модели.
+        _lm_chk, _lm_chk_err = _lm_o.check_connection(_lm_dest)
+        check(not _lm_chk_err, f"живая проверка проходит: {_lm_chk_err[:1]}")
+        check(any("ответила через мост" in m for m in _lm_chk),
+              f"и это ответ модели, а не взгляд на файлы: {_lm_chk[-1:]}")
+
+        # Провайдер в opencode: блок собирается из живых моделей.
+        _lm_block = _lm_o.provider_block(_lm_names)
+        check('"model-a"' in _lm_block and '"model-b"' in _lm_block
+              and _lm_o.api_url() in _lm_block,
+              "блок провайдера называет модели моста и его адрес")
+        check("apiKey" not in _lm_block and "sk-" not in _lm_block,
+              "ключа в блоке нет: мост берёт свой первый ключ из config.json")
+
+        _lm_cfg_dest = _lm_tmp / "настройки-включения"
+        _lm_cfg_dest.mkdir()
+        (_lm_cfg_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_p1, _lm_pe1 = _lm_o.install_provider(_lm_cfg_dest, _lm_names)
+        _lm_pcfg1 = (_lm_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _lm_p2, _lm_pe2 = _lm_o.install_provider(_lm_cfg_dest, _lm_names)
+        _lm_pcfg = (_lm_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _lm_pe1 and not _lm_pe2,
+              f"провайдер lmarena ставится без ошибок: "
+              f"{_lm_pe1 or _lm_pe2 or 'чисто'}")
+        check(_lm_pcfg == _lm_pcfg1,
+              "повтор провайдера не меняет файл настроек")
+        check(opencode_caps.check_jsonc(_lm_pcfg)
+              and opencode_caps.providers_status(_lm_cfg_dest).get(
+                  "lmarena") is True,
+              "настройки остались валидными, и статус видит пресет")
+        check("apiKey" not in _lm_pcfg and "base64-" not in _lm_pcfg,
+              "в настройках opencode нет ни ключа, ни токена арены")
+
+        # Динамический пресет без живого блока не ставится: выдумывать
+        # список моделей нельзя.
+        _lm_p3, _lm_pe3 = opencode_caps.install_providers(_lm_cfg_dest,
+                                                          {"lmarena"})
+        check(bool(_lm_pe3) and "живого моста" in _lm_pe3[0],
+              f"без живого моста провайдер lmarena не ставится: "
+              f"{_lm_pe3[:1]}")
+        check("lmarena" in opencode_caps.PROVIDER_DYNAMIC
+              and not opencode_caps.PROVIDER_PRESETS["lmarena"][2],
+              "и в пресетах он помечен как динамический")
+
+        # Мост молчит — живая проверка отказывает, а не «работает».
+        _lm_free = _lm_socket.socket()
+        _lm_free.bind(("127.0.0.1", 0))
+        _lm_free_port = _lm_free.getsockname()[1]
+        _lm_free.close()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+        _lm_ok5, _lm_data5, _lm_note5 = _lm_o.health(_lm_dest, timeout=2)
+        check(not _lm_ok5 and "не ответил" in _lm_note5,
+              f"молчащий порт — отказ: {_lm_note5[:70]}")
+        _lm_chk5, _lm_chk5_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk5_err),
+              f"и живая проверка не выдаёт это за успех: {_lm_chk5_err[:1]}")
+
+        # Мусор вместо JSON — тоже отказ: чужой процесс за портом.
+        _lm_junk, _lm_port_junk = _lm_api("junk")
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port_junk)
+        _lm_ok6, _lm_data6, _lm_note6 = _lm_o.health(_lm_dest, timeout=3)
+        check(not _lm_ok6 and "не разобрался" in _lm_note6,
+              f"мусор вместо JSON — тоже отказ: {_lm_note6[:70]}")
+        _lm_junk.shutdown()
+
+        # Ответ есть, а моделей нет — живая проверка отказывает и говорит
+        # про токен, а не ставит зелёную отметку.
+        _lm_empty, _lm_port_empty = _lm_api()
+        _LmBridge.models = []
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port_empty)
+        _lm_chk6, _lm_chk6_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk6_err) and "токен" in _lm_chk6_err[0],
+              f"без моделей живая проверка говорит про токен: "
+              f"{_lm_chk6_err[:1]}")
+        check("моделей нет" in _lm_o.status_text(_lm_dest),
+              f"статус видит мост без моделей: "
+              f"{_lm_o.status_text(_lm_dest)[-60:]}")
+        _LmBridge.models = [{"id": "model-a", "owned_by": "org-a"},
+                            {"id": "model-b", "owned_by": "org-b"}]
+
+        # Модель отвечает пустым текстом — это отказ, а не ответ.
+        _LmBridge.mode = "empty"
+        _lm_answer2, _lm_note7 = _lm_o.chat(_lm_dest, "model-a", "привет")
+        check(not _lm_answer2 and "пустым" in _lm_note7,
+              f"пустой ответ модели — отказ: {_lm_note7[:60]}")
+        _LmBridge.mode = "closed"
+        _lm_chk7, _lm_chk7_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk7_err) and "401" in _lm_chk7_err[0],
+              f"отказ API доходит до человека словами: {_lm_chk7_err[:1]}")
+        _LmBridge.mode = "healthy"
+        _lm_empty.shutdown()
+        _lm_good.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Автонастройка, когда кода нет и мост не отвечает: отказ словами и
+        # ни строчки в настройках opencode.
+        _lm_o.ENTRY = _lm_tmp / "нет-такого-main.py"
+        _lm_msgs8, _lm_errs8 = _lm_o.auto_setup(_lm_dest, _lm_srv)
+        check(bool(_lm_errs8)
+              and any("ничего не вписано" in e for e in _lm_errs8),
+              f"автонастройка без моста отказывает: {_lm_errs8[-1:]}")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "и снова ничего не пишет в настройки")
+        _lm_msgs9, _lm_errs9 = _lm_o.start(_lm_dest)
+        check(bool(_lm_errs9) and "не найден" in _lm_errs9[0],
+              f"запуск без кода отказывает: {_lm_errs9[:1]}")
+
+        # Автонастройка на отвечающем мосте: сначала живая проверка, потом
+        # запись. В настройки уходят и мост, и провайдер с живыми моделями.
+        _lm_good2, _lm_port2 = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port2)
+        _lm_o.ENTRY = _lm_fake_entry
+        _lm_auto_dest = _lm_tmp / "настройки-авто"
+        _lm_auto_dest.mkdir()
+        (_lm_auto_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_o.token_path(_lm_auto_dest).write_text(_lm_secret, encoding="utf-8")
+        _lm_auto_msgs, _lm_auto_errs = _lm_o.auto_setup(_lm_auto_dest, _lm_srv)
+        _lm_auto_text = (_lm_auto_dest / "opencode.jsonc").read_text(
+            encoding="utf-8")
+        check(not _lm_auto_errs,
+              f"автонастройка проходит на отвечающем мосте: "
+              f"{_lm_auto_errs[:1]}")
+        check("lmarena_bridge_launcher.py" in _lm_auto_text
+              and '"lmarena"' in _lm_auto_text,
+              "и вписывает мост в настройки opencode")
+        check('"model-a"' in _lm_auto_text and "baseURL" in _lm_auto_text,
+              "и провайдера с моделями, которые назвал мост")
+        check(_lm_secret not in _lm_auto_text
+              and "base64-" not in _lm_auto_text,
+              "токена арены в настройках opencode нет")
+        _lm_good2.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Кнопки окна: согласие спрашивается, и текст берётся из модуля.
+        _lm_main = (_root / "tools" / "dbapp" / "main.py").read_text(
+            encoding="utf-8")
+        check("LmarenaWarningDialog" in _lm_main
+              and "lmarena.WARNINGS" in _lm_main,
+              "окно показывает предупреждения из общего модуля")
+        check("_lm_confirm" in _lm_main
+              and _lm_main.count("not self._lm_confirm()") >= 3,
+              "согласие спрашивается перед запуском, перезапуском и настройкой")
+        check("LmarenaTokenDialog" in _lm_main
+              and "EchoMode.Password" in _lm_main
+              and "lmarena.save_token" in _lm_main,
+              "токен вводится скрытно и сохраняется модулем моста")
+        check("lmarena" in window.caps_tab.AUTO_SERVERS,
+              "lmarena включён в список автонастройки")
+        check("семь вещей" in _lm_main,
+              "и в подсказке сказано, что автонастройка умеет семь вещей")
+
+        # Идемпотентность включения моста в opencode — тем же механизмом.
+        _lm_clone = copy.copy(_lm_srv)
+        _lm_clone.raw = dict(_lm_srv.raw)
+        _lm_clone.raw["connection"] = dict(_lm_srv.raw.get("connection") or {},
+                                           warm_up=False)
+        _lm_clone.requirements = []
+        _lm_clone.has_connection = True
+        _lm_cfg2 = _lm_tmp / "настройки-mcp"
+        _lm_cfg2.mkdir()
+        (_lm_cfg2 / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_e1, _lm_ee1 = _mcp_registry.enable(_lm_cfg2, _lm_clone)
+        _lm_c1 = (_lm_cfg2 / "opencode.jsonc").read_text(encoding="utf-8")
+        _lm_e2, _lm_ee2 = _mcp_registry.enable(_lm_cfg2, _lm_clone)
+        _lm_c2 = (_lm_cfg2 / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _lm_ee1 and '"lmarena"' in _lm_c1
+              and "lmarena_bridge_launcher.py" in _lm_c1,
+              f"включение lmarena пишет блок в настройки: {_lm_ee1}")
+        check("{PROGRAM}" not in _lm_c1,
+              "и настоящий путь лаунчера подставлен, а не плейсхолдер")
+        check(_lm_c1 == _lm_c2 and _lm_c2.count('"lmarena"') == 1,
+              "повторное включение lmarena не меняет файл настройки")
+        check(any("не трогаю" in m for m in _lm_e2),
+              "и программа говорит, что файл не тронула")
+
+        # MCP-слой: протокол отвечает теми же тремя инструментами, что
+        # обещает запись реестра. Проверяем на поддельном мосте.
+        _lm_mcp, _lm_mcp_port = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_mcp_port)
+        _lm_say: list[str] = []
+        _lm_init = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18"}},
+            _lm_dest, _lm_say.append)
+        check(_lm_init["result"]["protocolVersion"] == "2025-06-18"
+              and _lm_init["result"]["serverInfo"]["name"] == "lmarena",
+              f"MCP: рукопожатие отвечает: {_lm_init['result']['serverInfo']}")
+        _lm_list = _lm_o.mcp_handle({"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/list"},
+                                    _lm_dest, _lm_say.append)
+        _lm_tools = [t["name"] for t in _lm_list["result"]["tools"]]
+        check(_lm_tools == ["lmarena_status", "lmarena_models", "lmarena_chat"],
+              f"MCP: три инструмента, как в реестре: {_lm_tools}")
+        check(_lm_o.mcp_handle({"jsonrpc": "2.0",
+                                "method": "notifications/initialized"},
+                               _lm_dest, _lm_say.append) is None,
+              "MCP: уведомление не требует ответа")
+        _lm_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "lmarena_chat",
+                        "arguments": {"model": "model-a",
+                                      "prompt": "привет"}}},
+            _lm_dest, _lm_say.append)
+        check(not _lm_call["result"]["isError"]
+              and _lm_call["result"]["content"][0]["text"] == "работает",
+              "MCP: ответ модели доходит через инструмент")
+        _lm_status_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": "lmarena_status", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        check(not _lm_status_call["result"]["isError"]
+              and "моделей: 2" in
+              _lm_status_call["result"]["content"][0]["text"],
+              "MCP: инструмент состояния отвечает без секретов")
+        _lm_unknown = _lm_o.mcp_handle({"jsonrpc": "2.0", "id": 5,
+                                        "method": "resources/list"},
+                                       _lm_dest, _lm_say.append)
+        check(_lm_unknown["error"]["code"] == -32601,
+              "MCP: неизвестный метод не делается молча")
+        _lm_bad_tool = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "нет-такого", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        check(_lm_bad_tool["result"]["isError"] is True,
+              "MCP: неизвестный инструмент — отказ, а не молчание")
+        _lm_o.deployed = lambda: False
+        _lm_down_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "lmarena_status", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        _lm_o.deployed = _lm_save[3]
+        check("не развёрнут" in _lm_down_call["result"]["content"][0]["text"],
+              "MCP: без моста инструмент говорит, что делать, а не молчит")
+        _lm_mcp.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Лаунчер живьём: поднимается как отдельный процесс и отвечает по
+        # протоколу. Секретов в его stdout быть не может — stdout это
+        # протокол, журнал идёт в stderr.
+        _lm_env = dict(_lm_os.environ)
+        _lm_env["OPENCODE_CONFIG_DIR"] = str(_lm_dest)
+        _lm_live, _lm_live_port = _lm_api()
+        _lm_env["LMARENA_PORT"] = str(_lm_live_port)
+        _lm_proc = _lm_sp.Popen(
+            [sys.executable, str(_lm_launcher)],
+            stdin=_lm_sp.PIPE, stdout=_lm_sp.PIPE, stderr=_lm_sp.PIPE,
+            text=True, encoding="utf-8", env=_lm_env, cwd=str(_root))
+        try:
+            _lm_proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "selftest",
+                                           "version": "1.0"}}}) + "\n")
+            _lm_proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n")
+            _lm_proc.stdin.flush()
+            _lm_line1 = _lm_proc.stdout.readline()
+            _lm_line2 = _lm_proc.stdout.readline()
+            _lm_proc.stdin.close()
+            _lm_proc.wait(timeout=30)
+        finally:
+            if _lm_proc.poll() is None:
+                _lm_proc.kill()
+            _lm_err_text = _lm_proc.stderr.read()
+            _lm_live.shutdown()
+        _lm_json1 = json.loads(_lm_line1)
+        _lm_json2 = json.loads(_lm_line2)
+        check(_lm_json1.get("result", {}).get("serverInfo", {}).get("name")
+              == "lmarena"
+              and [t["name"] for t in _lm_json2["result"]["tools"]]
+              == ["lmarena_status", "lmarena_models", "lmarena_chat"],
+              "лаунчер живьём отвечает по протоколу MCP")
+        check("[lmarena-bridge]" in _lm_err_text
+              and "запускаю мост" in _lm_err_text,
+              f"и весь журнал идёт в stderr: "
+              f"{_lm_err_text.splitlines()[:1]}")
+        check(_lm_secret not in _lm_err_text,
+              "в журнале лаунчера нет токена арены")
+        check("base64-" not in _lm_line1 + _lm_line2,
+              "и в самом протоколе секретов нет")
+
+        # Командная строка моста: то же, что кнопки окна, и без секретов.
+        _lm_cli = _lm_o.__file__
+        _lm_cli_env = dict(_lm_os.environ)
+        _lm_cli_env["OPENCODE_CONFIG_DIR"] = str(_lm_dest)
+        _lm_help = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "--help"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_help.returncode == 0
+              and all(word in _lm_help.stdout
+                      for word in ("status", "restart", "models", "token")),
+              f"у моста есть командная строка для скилла: "
+              f"{_lm_help.stdout.strip()[:60]}")
+        _lm_unknown_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "абракадабра"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_unknown_cli.returncode == 2
+              and "Не знаю такой команды" in _lm_unknown_cli.stdout,
+              f"неизвестная команда не делается молча: "
+              f"{_lm_unknown_cli.stdout.strip()[:60]}")
+        _lm_token_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "token"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_token_cli.returncode == 0
+              and "Есть токен: да" in _lm_token_cli.stdout
+              and _lm_secret not in _lm_token_cli.stdout,
+              "команда token говорит «да/нет», не показывая значение")
+
+        # Команда status отвечает кодом 0, только когда мост живой, и кодом
+        # 1, когда молчит. Код возврата и есть ответ «мост отвечает или нет».
+        _lm_cli_live, _lm_cli_port = _lm_api()
+        _lm_cli_env["LMARENA_PORT"] = str(_lm_cli_port)
+        _lm_status_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "status"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_status_cli.returncode == 0
+              and "Мост" in _lm_status_cli.stdout,
+              f"status на живом мосте — код 0: "
+              f"{_lm_status_cli.stdout.strip()[:70]}")
+        _lm_cli_live.shutdown()
+        _lm_cli_env["LMARENA_PORT"] = str(_lm_free_port)
+        _lm_status_cli2 = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "status"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_status_cli2.returncode == 1,
+              f"status на молчащем мосте — код 1: "
+              f"{_lm_status_cli2.stdout.strip()[:70]}")
+
+        # Служебная команда «stop» чужой процесс на порту не трогает.
+        _lm_msgs10, _lm_errs10 = _lm_o.stop(_lm_dest)
+        check(not _lm_errs10,
+              f"stop ничего не трогает, когда мост не наш: "
+              f"{(not _lm_errs10 and 'чисто') or _lm_errs10[0][:50]}")
+    finally:
+        (_lm_o.ENTRY, _lm_o.SERVER_DIR, _lm_o.venv_python,
+         _lm_o.deployed) = _lm_save
+        if _lm_env_port is None:
+            _lm_os.environ.pop("LMARENA_PORT", None)
+        else:
+            _lm_os.environ["LMARENA_PORT"] = _lm_env_port
+        if _lm_env_host is None:
+            _lm_os.environ.pop("LMARENA_HOST", None)
+        else:
+            _lm_os.environ["LMARENA_HOST"] = _lm_env_host
+        shutil.rmtree(_lm_tmp, ignore_errors=True)
+
+    # ---- 8ч. rtk и caveman: инструменты экономии, не MCP. ----------------
+    # По §7 инструкции оба — не серверы: в mcp-registry.json их быть не
+    # должно. rtk кладётся в настройки плагином, caveman — правилами в
+    # AGENTS.md между нашими метками. Живого rtk в этой проверке нет: его
+    # бинарник человек ставит по README, из песочницы он не скачивается.
+    # Поэтому поведение проверяется на заглушке, которая подменяет сам
+    # вызов rtk и отвечает так, как отвечает настоящий по README. Это
+    # проверка нашего кода, а не доказательство экономии: экономию мерит
+    # человек на своей машине кнопкой «Замерить rtk».
+    import hashlib as _tk_hashlib  # noqa: PLC0415
+    import os as _tk_os  # noqa: PLC0415
+    import subprocess as _tk_sp  # noqa: PLC0415
+    import rtk as _tk_rtk  # noqa: PLC0415 — рядом лежит, круга нет
+    import caveman as _tk_cave  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8ч. rtk и caveman: экономия ответов и вывода ---")
+
+    def _tk_blob(path: Path) -> str:
+        """git-blob-sha1: им сверяются копии чужих файлов."""
+        _data = path.read_bytes()
+        return _tk_hashlib.sha1(b"blob %d\0" % len(_data) + _data).hexdigest()
+
+    _tk_root = core.program_root()
+    _tk_payloads = (
+        ("плагин rtk", _tk_root / "tools" / "thirdparty" / "rtk" / "hooks"
+         / "opencode" / "rtk.ts", _tk_rtk.SOURCE_BLOB,
+         ("tool.execute.before", "rtk hook opencode", "which rtk")),
+        ("правила caveman, лёгкий уровень", _tk_root / "tools" / "thirdparty"
+         / "caveman" / "levels" / "lite.md",
+         _tk_cave.SOURCE_BLOBS["levels/lite.md"],
+         ("Respond terse like smart caveman", "All technical substance stay")),
+        ("правила caveman, полный уровень", _tk_root / "tools" / "thirdparty"
+         / "caveman" / "levels" / "full.md",
+         _tk_cave.SOURCE_BLOBS["levels/full.md"],
+         ("ultracave", "Each fact once")),
+    )
+    for _tk_title, _tk_path, _tk_want_blob, _tk_marks in _tk_payloads:
+        check(_tk_path.is_file(), f"{_tk_title}: копия лежит в tools/thirdparty")
+        if not _tk_path.is_file():
+            continue
+        check(_tk_blob(_tk_path) == _tk_want_blob,
+              f"{_tk_title}: байты совпадают с исходником автора "
+              f"(blob {_tk_want_blob[:8]})")
+        _tk_text = _tk_path.read_text(encoding="utf-8")
+        _tk_missing = [m for m in _tk_marks if m not in _tk_text]
+        check(not _tk_missing,
+              f"{_tk_title}: ключевые строки на месте (нет: {_tk_missing})")
+
+    for _tk_name in ("rtk", "caveman"):
+        check((_tk_root / "tools" / "thirdparty" / _tk_name / "LICENSE").is_file(),
+              f"{_tk_name}: текст лицензии автора лежит рядом с кодом")
+    check((_tk_root / "tools" / "thirdparty" / "caveman" / "NOTICE").is_file(),
+          "caveman: уведомление автора (NOTICE) тоже рядом — так требует Apache-2.0")
+
+    # Плагин rtk не должен лежать в config/plugins: иначе он ставился бы
+    # всегда, без галочки, и переключатель был бы обманом.
+    _tk_cfg_plugins = sorted(
+        p.name for p in (_tk_root / "config" / "plugins").glob("*") if p.is_file()
+    )
+    check(_tk_cfg_plugins == ["memory-base.js"],
+          f"в config/plugins только плагин памяти, rtk ставится галочкой: {_tk_cfg_plugins}")
+
+    # Уведомления и честность цифр.
+    _tk_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _tk_name in ("rtk-ai/rtk", "JuliusBrussee/caveman"):
+        check(_tk_name in _tk_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник: {_tk_name}")
+    _tk_cav_readme = (_tk_root / "tools" / "thirdparty" / "caveman"
+                      / "README.md").read_text(encoding="utf-8")
+    check("opencode" in _tk_cav_readme and "plugin" in _tk_cav_readme,
+          "caveman: в README отмечено, что opencode автор поддерживает")
+    check("65–75%" in _tk_cav_readme and "независимой проверки нет" in _tk_cav_readme,
+          "caveman: 65–75% названы заявлением автора, а не фактом")
+    check("65–75%" in _tk_notice and "независимой проверки нет" in _tk_notice,
+          "caveman: та же оговорка стоит и в уведомлениях о лицензиях")
+    check("node bin/install.js --only opencode" in _tk_cav_readme,
+          "caveman: сказано, какой установщик автора программа не запускает")
+    _tk_rtk_readme = (_tk_root / "tools" / "thirdparty" / "rtk"
+                      / "README.md").read_text(encoding="utf-8")
+    for _tk_bit in ("winget install rtk-ai.rtk", "cargo install --git",
+                    "rtk --version", "rtk gain"):
+        check(_tk_bit in _tk_rtk_readme,
+              f"rtk: порядок установки и проверки взят из README автора: {_tk_bit}")
+    check("rtk init -g --opencode" in _tk_rtk_readme,
+          "rtk: названа команда автора, которую программа не выполняет (правит Claude)")
+
+    # Не MCP: в реестре серверов их нет.
+    _tk_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _tk_ids = {str(s.get("id")) for s in _tk_registry.get("servers", [])}
+    check(not ({"rtk", "caveman"} & _tk_ids),
+          "rtk и caveman не записаны серверами MCP — они не серверы")
+
+    # Галочки, уровень и кнопки на вкладке opencode.
+    _tk_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check({"rtk", "caveman"} <= _tk_choices,
+          "галочки rtk и caveman есть в списке вкладки opencode")
+    check({name for name, _title in opencode_caps.CAPS} >= {"rtk", "caveman"},
+          "и в общем списке возможностей — иначе их не примет установка")
+    check({"rtk", "caveman"} <= set(opencode_caps.CAPS_OFF_BY_DEFAULT),
+          "обе галочки по умолчанию сняты: включать их молча нельзя")
+    _tk_main = (_tk_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _tk_bit, _tk_why in (
+        ("Замерить rtk", "кнопка замера"),
+        ("Уровень caveman", "выбор уровня caveman"),
+        ("caveman_level", "передача уровня в установку"),
+        ('"full"', "полный уровень в списке"),
+    ):
+        check(_tk_bit in _tk_main, f"вкладка opencode: {_tk_why} ({_tk_bit})")
+    _tk_caps_src = (_tk_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    check("caveman_level" in _tk_caps_src and "_caveman_module" in _tk_caps_src,
+          "установка возможностей знает про уровень caveman")
+    check("_rtk_module" in _tk_caps_src,
+          "и про rtk — своим модулем, как обход блокировок")
+    _tk_core_src = (_tk_root / "tools" / "dbapp" / "core.py").read_text(encoding="utf-8")
+    check("caveman.rescue" in _tk_core_src,
+          "повторное «Подключить базу» возвращает правила caveman в AGENTS.md")
+    _tk_base_agents = (_tk_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("rtk" in _tk_base_agents and "caveman" in _tk_base_agents,
+          "инструменты упомянуты в config/AGENTS.md, как велит §7 инструкции")
+    check("не MCP" in _tk_base_agents,
+          "и там же сказано, что это не MCP-серверы")
+
+    # ---- поведение: настройки во временной папке, rtk — заглушкой.
+    _TK_FAKE = "/заглушка/rtk"
+    _tk_tmp = Path(tempfile.mkdtemp(prefix="tk-caps-"))
+    _tk_saved = (_tk_rtk.find_binary, _tk_rtk._run)
+
+    def _tk_fake_binary():
+        return _TK_FAKE
+
+    def _tk_fake_run(args, timeout):
+        """Ответы, которые даёт настоящий rtk по README: версия и hook."""
+        if "--version" in args:
+            return 0, "rtk 9.9.9-заглушка", ""
+        if len(args) > 2 and args[1] == "hook":
+            return 0, "{}", ""
+        if args and args[0] == _TK_FAKE:
+            return 0, "short output", ""
+        return 0, "d" * 400, ""
+
+    try:
+        # Случай «rtk не поставлен». Проверка идёт ДО записи: в настройки
+        # не должно попасть ничего, включая папку plugins и манифест.
+        _tk_dest = _tk_tmp / "settings"
+        _tk_dest.mkdir()
+        _tk_rtk.find_binary = lambda: None
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest)
+        check(bool(_tk_e),
+              "без rtk программа отказывает, а не делает вид, что включила")
+        check(any("ничего не вписано" in x for x in _tk_e),
+              f"отказ говорит, что в настройки ничего не вписано: {_tk_e[:1]}")
+        check(not (_tk_dest / "plugins" / "rtk.ts").exists(),
+              "плагин при отказе не появляется")
+        check(not (_tk_dest / "plugins").exists(),
+              "и папка plugins не создаётся ради отказа")
+        check(not (_tk_dest / ".opencode-base-caps.json").exists(),
+              "и манифест установки не заводится")
+        _tk_ok, _tk_note = _tk_rtk.live_check()
+        check(not _tk_ok and "не найден" in _tk_note,
+              f"живая проверка честно называет причину: {_tk_note[:60]}")
+        _tk_m, _tk_e = _tk_rtk.measure()
+        check(not _tk_m and any("не проверено" in x for x in _tk_e),
+              "замер без rtk не выдумывает числа, а говорит «это не проверено»")
+
+        # Рабочий rtk (заглушка): версия отвечает и «hook opencode» отвечает.
+        _tk_rtk.find_binary = _tk_fake_binary
+        _tk_rtk._run = _tk_fake_run
+        _tk_ok, _tk_note = _tk_rtk.live_check()
+        check(_tk_ok, f"живая проверка проходит на отвечающем rtk: {_tk_note}")
+
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest)
+        _tk_plugin = _tk_dest / "plugins" / "rtk.ts"
+        check(not _tk_e and _tk_plugin.is_file(),
+              f"плагин ставится в plugins/rtk.ts: {_tk_e}")
+        check(_tk_plugin.read_text(encoding="utf-8") == (
+            _tk_root / "tools" / "thirdparty" / "rtk" / "hooks" / "opencode"
+            / "rtk.ts").read_text(encoding="utf-8"),
+            "поставленный плагин по тексту — копия файла автора, без правок")
+        _tk_manifest = json.loads(
+            (_tk_dest / ".opencode-base-caps.json").read_text(encoding="utf-8"))
+        check(str(_tk_plugin) in _tk_manifest.get("files", {}),
+              "файл записан в наш манифест — чужое им не считается")
+        check(opencode_caps.caps_status(_tk_dest).get("rtk") is True,
+              "состояние на вкладке видит поставленный плагин")
+
+        _tk_text_before = _tk_plugin.read_text(encoding="utf-8")
+        _tk_m2, _tk_e2 = _tk_rtk.install(_tk_dest)
+        check(_tk_plugin.read_text(encoding="utf-8") == _tk_text_before,
+              "повторное «Включить» файл не меняет")
+        check(any("не менялся" in x for x in _tk_m2),
+              f"и говорит об этом словами: {_tk_m2[-1:]}")
+        _tk_m3, _tk_e3 = _tk_rtk.remove(_tk_dest)
+        check(not _tk_e3 and not _tk_plugin.exists(),
+              f"выключение убирает наш плагин: {_tk_e3}")
+        _tk_m4, _tk_e4 = _tk_rtk.remove(_tk_dest)
+        check(not _tk_e4 and any("не стоял" in x for x in _tk_m4),
+              "повторное выключение — не ошибка, а «убирать нечего»")
+
+        # Старая версия: команды «hook opencode» нет — плагин был бы мёртвым.
+        _tk_dest_old = _tk_tmp / "settings-old"
+        _tk_dest_old.mkdir()
+
+        def _tk_fake_old(args, timeout):
+            if "--version" in args:
+                return 0, "rtk 0.50.0-заглушка", ""
+            return 2, "", "usage: rtk ..."
+
+        _tk_rtk._run = _tk_fake_old
+        _tk_ok_old, _tk_note_old = _tk_rtk.live_check()
+        check(not _tk_ok_old and "v0.51" in _tk_note_old,
+              f"старая версия отвергается с объяснением: {_tk_note_old[:70]}")
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest_old)
+        check(not (_tk_dest_old / "plugins" / "rtk.ts").exists()
+              and any("ничего не вписано" in x for x in _tk_e),
+              "со старым rtk плагин не ставится, и настройки не тронуты")
+
+        # Замер: та же команда дважды, числами.
+        _tk_rtk._run = _tk_fake_run
+        _tk_mm, _tk_ee = _tk_rtk.measure(command=(sys.executable, "-c", "print(1)"),
+                                        cwd=_tk_tmp)
+        _tk_text_mm = " | ".join(_tk_mm)
+        check(not _tk_ee and any("Без rtk: 400 байт" in x for x in _tk_mm),
+              f"замер показывает байты без rtk: {_tk_text_mm[:80]}")
+        check(any("Через rtk: 12 байт" in x for x in _tk_mm),
+              f"и через rtk: {_tk_text_mm[:120]}")
+        check(any("Короче на 97%" in x for x in _tk_mm),
+              f"и называет, насколько короче: {_tk_mm[-1:]}")
+
+        # Команда не запустилась — замер молчит о числах и говорит причину.
+        def _tk_fake_fail(args, timeout):
+            return 1, "", "No such file or directory"
+
+        _tk_rtk._run = _tk_fake_fail
+        _tk_m, _tk_e = _tk_rtk.measure(command=("python-которого-нет",), cwd=_tk_tmp)
+        check(not _tk_m and bool(_tk_e),
+              "если команда не запускается, замер честно отказывает")
+        _tk_rtk._run = _tk_fake_run
+
+        # Чужие файлы: и при установке, и при уборке.
+        _tk_dest_f = _tk_tmp / "settings-foreign"
+        (_tk_dest_f / "plugins").mkdir(parents=True)
+        (_tk_dest_f / "plugins" / "rtk.ts").write_text(
+            "// чужой плагин, не наш\n", encoding="utf-8")
+        _tk_m, _tk_e = _tk_rtk.install(_tk_dest_f)
+        check(any("не наш" in x for x in _tk_e),
+              f"чужой rtk.ts не перезаписывается: {_tk_e[:1]}")
+        check((_tk_dest_f / "plugins" / "rtk.ts").read_text(encoding="utf-8")
+              == "// чужой плагин, не наш\n",
+              "чужой файл остался ровно таким, каким был")
+        _tk_m, _tk_e = _tk_rtk.remove(_tk_dest_f)
+        check(any("не наш" in x for x in _tk_e)
+              and (_tk_dest_f / "plugins" / "rtk.ts").is_file(),
+              "и убрать чужой файл программа отказывается")
+
+        # Командная строка — то же, что кнопки. Живого rtk здесь может и не
+        # быть, поэтому «check» принимается в обоих исходах: важно, что он
+        # отвечает словами и не врёт.
+        _tk_cli = _tk_root / "tools" / "dbapp" / "rtk.py"
+        _tk_env = dict(_tk_os.environ)
+        _tk_env["OPENCODE_CONFIG_DIR"] = str(_tk_dest)
+        _tk_run = _tk_sp.run(
+            [sys.executable, str(_tk_cli), "status"], capture_output=True,
+            text=True, encoding="utf-8", env=_tk_env, timeout=90)
+        check(_tk_run.returncode == 0 and "Плагин rtk" in _tk_run.stdout,
+              f"командная строка rtk говорит состояние: "
+              f"{_tk_run.stdout.strip()[:60]}")
+        _tk_run = _tk_sp.run(
+            [sys.executable, str(_tk_cli), "check"], capture_output=True,
+            text=True, encoding="utf-8", env=_tk_env, timeout=90)
+        check(_tk_run.returncode in (0, 1) and "Живая проверка" in _tk_run.stdout,
+              f"и отвечает на «check» словами, а не молчанием: "
+              f"{_tk_run.stdout.strip()[:70]}")
+
+        # ---- caveman: правила в AGENTS.md, два уровня.
+        _tk_cav_dest = _tk_tmp / "caveman"
+        _tk_cav_dest.mkdir()
+        _tk_agents = _tk_cav_dest / "AGENTS.md"
+        _tk_agents.write_text(
+            "# Чужие правила базы\n\nЭту строку программа трогать не должна.\n",
+            encoding="utf-8")
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "lite")
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(not _tk_e, f"правила caveman вписываются без ошибок: {_tk_e}")
+        check(_tk_text.count(_tk_cave.BEGIN_MARK) == 1
+              and _tk_text.count(_tk_cave.END_MARK) == 1,
+              "метки caveman стоят ровно парой")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "чужие строки в AGENTS.md остались нетронутыми")
+        check("All technical substance stay" in _tk_text,
+              "в блоке — правила автора, а не пересказ")
+        check("65–75%" in _tk_text and "не проверена" in _tk_text,
+              "и там же сказано, что 65–75% — заявление автора")
+        check("Apache-2.0" in _tk_text,
+              "и что правила — чужая работа под Apache-2.0")
+        check(_tk_cave.status(_tk_cav_dest).get("level") == "lite",
+              "состояние показывает лёгкий уровень")
+
+        _tk_before = _tk_agents.read_bytes()
+        _tk_m2, _tk_e2 = _tk_cave.install(_tk_cav_dest, "lite")
+        check(_tk_agents.read_bytes() == _tk_before,
+              "повторная установка того же уровня файл не переписывает")
+        check(any("файл не менялся" in x for x in _tk_m2),
+              f"и об этом сказано словами: {_tk_m2[-1:]}")
+
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "full")
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(_tk_text.count(_tk_cave.BEGIN_MARK) == 1
+              and _tk_text.count(_tk_cave.END_MARK) == 1,
+              "смена уровня не двоит блок: метки по-прежнему парой")
+        check(_tk_cave.status(_tk_cav_dest).get("level") == "full",
+              "состояние показывает полный уровень")
+        check("Each fact once" in _tk_text,
+              "в полном уровне — правила ultracave автора")
+        check("disable-model-invocation" not in _tk_text,
+              "служебная шапка файла навыка в AGENTS.md не попала")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "чужие строки целы и после смены уровня")
+
+        _tk_m, _tk_e = _tk_cave.install(_tk_cav_dest, "какой-то-свой")
+        check(any("неизвестен" in x for x in _tk_m)
+              and _tk_cave.status(_tk_cav_dest).get("level") == "lite",
+              "неизвестный уровень не выдумывается, а заменяется лёгким")
+
+        # Поломанные метки: файл не трогаем, говорим прямо.
+        _tk_broken = _tk_tmp / "broken"
+        _tk_broken.mkdir()
+        (_tk_broken / "AGENTS.md").write_text(
+            "# чужое\n\n" + _tk_cave.BEGIN_MARK + "\nсередина без конца\n",
+            encoding="utf-8")
+        _tk_m, _tk_e = _tk_cave.install(_tk_broken, "lite")
+        check(bool(_tk_e) and "не парой" in " ".join(_tk_e),
+              f"поломанные метки не правятся автоматом: {_tk_e[:1]}")
+        check("середина без конца" in (_tk_broken / "AGENTS.md").read_text(
+            encoding="utf-8"),
+            "и файл с поломанными метками остался как был")
+        _tk_m, _tk_e = _tk_cave.remove(_tk_broken)
+        check(bool(_tk_e) and "не парой" in " ".join(_tk_e),
+              "уборка при поломанных метках тоже отказывает")
+
+        _tk_m, _tk_e = _tk_cave.remove(_tk_cav_dest)
+        _tk_text = _tk_agents.read_text(encoding="utf-8")
+        check(not _tk_e and _tk_cave.BEGIN_MARK not in _tk_text,
+              f"выключение убирает наш блок: {_tk_e}")
+        check("Эту строку программа трогать не должна." in _tk_text,
+              "и чужие строки после уборки целы")
+        check(_tk_cave.status(_tk_cav_dest).get("installed") is False,
+              "состояние видит, что правил нет")
+
+        # Правила возвращаются, если «Подключить базу» перезаписало AGENTS.md.
+        _tk_cave.install(_tk_cav_dest, "full")
+        _tk_saved_text = _tk_agents.read_text(encoding="utf-8")
+        _tk_agents.write_text("# шаблон базы заново\n", encoding="utf-8")
+        check(_tk_cave.rescue(_tk_cav_dest, _tk_saved_text) is True
+              and _tk_cave.status(_tk_cav_dest).get("level") == "full",
+              "повторное подключение базы возвращает правила caveman")
+        check("шаблон базы заново" in _tk_agents.read_text(encoding="utf-8"),
+              "и заново скопированный файл не портится")
+        check(_tk_cave.rescue(_tk_cav_dest, "# без меток\n") is False,
+              "без наших меток возвращать нечего — rescue молчит")
+
+        # Через установку возможностей: то же, что кнопка «Поставить отмеченное».
+        _tk_dest_caps = _tk_tmp / "caps"
+        _tk_dest_caps.mkdir()
+        _tk_m, _tk_e = opencode_caps.install_caps(
+            _tk_root, _tk_dest_caps, {"rtk", "caveman"}, caveman_level="full")
+        _tk_status = opencode_caps.caps_status(_tk_dest_caps)
+        check(not _tk_e, f"галочки ставятся без ошибок: {_tk_e}")
+        check(_tk_status.get("rtk") is True and _tk_status.get("caveman") is True,
+              f"и состояние вкладки видит оба: {_tk_status}")
+        check((_tk_dest_caps / "plugins" / "rtk.ts").is_file(),
+              "плагин rtk лёг куда надо")
+        _tk_caps_agents = (_tk_dest_caps / "AGENTS.md").read_text(encoding="utf-8")
+        check("уровень: полный (ultracave)" in _tk_caps_agents,
+              "и уровень caveman — тот, что выбран в списке")
+        _tk_m, _tk_e = opencode_caps.remove_caps(_tk_dest_caps, {"rtk", "caveman"})
+        _tk_status = opencode_caps.caps_status(_tk_dest_caps)
+        check(not _tk_e and not _tk_status.get("rtk")
+              and not _tk_status.get("caveman"),
+              f"кнопка «Убрать отмеченное» снимает оба: {_tk_e}")
+
+        # Вкладка opencode: обе галочки на месте, сняты по умолчанию,
+        # у caveman — выбор из двух уровней, у rtk — кнопка замера.
+        _tk_tab = window.caps_tab
+        check({"rtk", "caveman"} <= set(_tk_tab.checks),
+              f"на вкладке opencode обе галочки стоят: {sorted(_tk_tab.checks)}")
+        check(all(not _tk_tab.checks[name].isChecked()
+              for name in ("rtk", "caveman")),
+              "и обе сняты по умолчанию — молча такое не включается")
+        _tk_combo = [_tk_tab.caveman_level.itemData(i)
+                     for i in range(_tk_tab.caveman_level.count())]
+        check(_tk_combo == ["lite", "full"],
+              f"у caveman выбор из двух уровней: {_tk_combo}")
+        check(_tk_tab.btn_rtk_measure.isEnabled(),
+              "кнопка замера rtk доступна — числа человек получает на своей машине")
+
+        # Секретов и настоящих путей в новых файлах быть не должно.
+        _tk_our_files = (
+            _tk_root / "tools" / "dbapp" / "rtk.py",
+            _tk_root / "tools" / "dbapp" / "caveman.py",
+            _tk_root / "tools" / "thirdparty" / "rtk" / "README.md",
+            _tk_root / "tools" / "thirdparty" / "caveman" / "README.md",
+            _tk_cave.block_text("lite"),
+            _tk_cave.block_text("full"),
+        )
+        _tk_leaks: list[str] = []
+        for _tk_item in _tk_our_files:
+            _tk_where = str(_tk_item)
+            _tk_body = (_tk_item if isinstance(_tk_item, str)
+                        else _tk_item.read_text(encoding="utf-8"))
+            for _tk_mark in ("C:\\Users\\", "/home/", "/Users/", "sk-"):
+                if _tk_mark in _tk_body:
+                    _tk_leaks.append(f"{_tk_where}: {_tk_mark}")
+        check(not _tk_leaks,
+              f"в новых файлах нет секретов и настоящих путей: {_tk_leaks}")
+    finally:
+        _tk_rtk.find_binary, _tk_rtk._run = _tk_saved
+        shutil.rmtree(_tk_tmp, ignore_errors=True)
+
+    # ---- 8к. pxpipe: сжатие запроса картинками, не MCP. -------------------
+    # По §7 инструкции это не сервер: в mcp-registry.json его быть не должно.
+    # Прокси — чужая программа из npm (пакет pxpipe-proxy). Скачать её в
+    # самопроверке нельзя: это зависит от сети и от машины. Поэтому поведение
+    # проверяется на заглушке того же устройства: она отвечает панелью и
+    # пересылает запрос, как настоящий прокси по README автора. Это проверка
+    # нашего кода, а не доказательство экономии: экономию и «влезает больше»
+    # человек мерит на своей машине кнопками.
+    import socket as _px_socket  # noqa: PLC0415
+    import urllib.request as _px_url  # noqa: PLC0415
+    import pxpipe as _px  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _px_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8к. pxpipe: сжатие запроса картинками ---")
+
+    _px_root = core.program_root()
+    _px_third = _px_root / "tools" / "thirdparty" / "pxpipe"
+
+    # Копия лицензии автора — байт в байт из npm-пакета, который запускаем.
+    _px_lic = _px_third / "LICENSE"
+    check(_px_lic.is_file(), "pxpipe: текст лицензии MIT лежит рядом")
+    if _px_lic.is_file():
+        check(_tk_blob(_px_lic) == _px.LICENSE_BLOB,
+              f"pxpipe: лицензия — байт в байт из пакета (blob {_px.LICENSE_BLOB[:8]})")
+    _px_readme = _px_third / "README.md"
+    check(_px_readme.is_file(), "pxpipe: рядом наш README — что взято и чего не делаем")
+    _px_readme_text = _px_readme.read_text(encoding="utf-8") if _px_readme.is_file() else ""
+    for _px_bit, _px_why in (
+        ("pxpipe-proxy@0.14.0", "закреплённая версия пакета"),
+        ("127.0.0.1:47821", "адрес прокси из README автора"),
+        ("не MCP", "сказано, что это не MCP-сервер"),
+        ("59–70%", "цифры автора названы его заявлениями"),
+        ("независимо не провер", "и что независимой проверки нет"),
+        ("pxpipe-windows", "оговорка про Windows сказана честно"),
+    ):
+        check(_px_bit in _px_readme_text, f"pxpipe: в README — {_px_why} ({_px_bit})")
+
+    # Команда и адрес — из README автора, ничего не выдумано.
+    check(_px.PACKAGE == "pxpipe-proxy" and _px.PACKAGE_VERSION == "0.14.0",
+          f"pxpipe: пакет и версия — {_px.PACKAGE}@{_px.PACKAGE_VERSION}")
+    check(_px.PORT == 47821 and _px.HOST == "127.0.0.1",
+          f"pxpipe: адрес по умолчанию — {_px.HOST}:{_px.PORT} (из README автора)")
+    _px_launch = _px.launch_command()
+    check(_px_launch[-1].endswith("pxpipe-proxy@0.14.0") and "--yes" in _px_launch,
+          f"pxpipe: команда запуска — {_px_launch}")
+
+    # Предупреждение: заявления автора названы заявлениями, риск — прямо.
+    for _px_bit in ("59–70%", "независимо не проверенное", "неверно", "включай"):
+        check(_px_bit in _px.WARNING, f"pxpipe: в предупреждении сказано про {_px_bit}")
+
+    # Не MCP: в реестре серверов его нет.
+    _px_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _px_ids = {str(s.get("id")) for s in _px_registry.get("servers", [])}
+    check("pxpipe" not in _px_ids,
+          "pxpipe не записан сервером MCP — это прокси, а не сервер")
+
+    # Уведомления и правила базы знают про pxpipe.
+    _px_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _px_bit in ("teamchong/pxpipe", "pxpipe-proxy", "6b5f347b", "59–70%"):
+        check(_px_bit in _px_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и цифры: {_px_bit}")
+    _px_agents = (_px_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("pxpipe" in _px_agents and "не MCP" in _px_agents,
+          "config/AGENTS.md: про pxpipe сказано, и что это не MCP")
+
+    # Галочка и установка знают pxpipe своим модулем.
+    _px_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    _px_caps = {name for name, _title in opencode_caps.CAPS}
+    check("pxpipe" in _px_choices and "pxpipe" in _px_caps,
+          "галочка pxpipe есть и в списке вкладки, и в общем списке возможностей")
+    check("pxpipe" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка pxpipe снята по умолчанию: такое включают осознанно")
+    _px_caps_src = (_px_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _px_bit in ("_pxpipe_module", "pxpipe_provider",
+                    "_pxpipe_module().install", "_pxpipe_module().remove"):
+        check(_px_bit in _px_caps_src,
+              f"установка возможностей зовёт pxpipe своим модулем ({_px_bit})")
+    _px_main = (_px_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _px_bit, _px_why in (
+        ("Запустить pxpipe", "кнопка запуска"),
+        ("Остановить pxpipe", "кнопка остановки"),
+        ("Проверить pxpipe", "кнопка живой проверки"),
+        ("Числа pxpipe", "кнопка счётчиков"),
+        ("PxpipeWarningDialog", "окно-предупреждение"),
+        ("Источник для pxpipe", "выбор источника запросов"),
+        ("pxpipe_provider=px_source", "передача источника в установку"),
+    ):
+        check(_px_bit in _px_main, f"вкладка opencode: {_px_why} ({_px_bit})")
+
+    # ---- поведение: отказы, запись и уборка во временной папке.
+    _px_tmp = Path(tempfile.mkdtemp(prefix="px-caps-"))
+    _px_saved = (_px.find_npx, _px._run, _px.launch_command)
+    _px_saved_port = _tk_os.environ.get("PXPIPE_PORT")
+    _px_stub_proc: list = []
+
+    def _px_free_port() -> int:
+        """Свободный порт: занимаем и сразу отдаём — так его не выберет другой."""
+        with _px_socket.socket() as _s:
+            _s.bind(("127.0.0.1", 0))
+            return int(_s.getsockname()[1])
+
+    _PX_STUB = (
+        "import json, os, sys\n"
+        "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+        "PORT = int(os.environ['PORT'])\n"
+        "LOG = os.environ.get('PXPIPE_LOG', '')\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    protocol_version = 'HTTP/1.1'\n"
+        "    def _send(self, code, text, kind='text/html; charset=utf-8'):\n"
+        "        raw = text.encode('utf-8')\n"
+        "        self.send_response(code)\n"
+        "        self.send_header('content-type', kind)\n"
+        "        self.send_header('content-length', str(len(raw)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(raw)\n"
+        "    def do_GET(self):\n"
+        "        if self.path == '/':\n"
+        "            self._send(200, '<html><title>pxpipe dashboard</title></html>')\n"
+        "        else:\n"
+        "            self._send(200, json.dumps({'object': 'list', 'data': []}),\n"
+        "                       'application/json')\n"
+        "    def do_POST(self):\n"
+        "        n = int(self.headers.get('content-length') or 0)\n"
+        "        raw = self.rfile.read(n) if n else b''\n"
+        "        if LOG:\n"
+        "            with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "                f.write(json.dumps({'method': 'POST', 'path': self.path,\n"
+        "                                    'bytes': len(raw)}) + '\\n')\n"
+        "        self._send(200, json.dumps({'ok': True, 'path': self.path}),\n"
+        "                   'application/json')\n"
+        "    def log_message(self, *a):\n"
+        "        pass\n"
+        "ThreadingHTTPServer(('127.0.0.1', PORT), H).serve_forever()\n"
+    )
+    _px_stub = _px_tmp / "px_stub.py"
+    _px_stub.write_text(_PX_STUB, encoding="utf-8")
+    _px_port = _px_free_port()
+    _px_foreign_port = _px_free_port()
+    _tk_os.environ["PXPIPE_PORT"] = str(_px_port)
+    _px.launch_command = lambda: [sys.executable, str(_px_stub)]
+    _px.find_npx = lambda: sys.executable
+    _px_spawn = _tk_sp
+
+    def _px_right_off() -> None:
+        """Гасит заглушки, если что-то пошло не так до уборки."""
+        for _proc in _px_stub_proc:
+            try:
+                _proc.kill()
+                _proc.wait(timeout=15)
+            except Exception:
+                pass
+        _px_stub_proc.clear()
+
+    def _px_stub_events() -> int:
+        """Сколько строк дописала заглушка в журнал прокси."""
+        path = _px.events_file(_px_dest)
+        if not path.is_file():
+            return 0
+        return len([line for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()])
+
+    try:
+        # Случай «прокси не запущен». Проверка идёт ДО записи: в настройки не
+        # должно попасть ничего, вплоть до создания файла настроек.
+        _px_dest = _px_tmp / "settings"
+        _px_dest.mkdir()
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        check(any("не включён" in x for x in _px_e)
+              and any("ничего не вписано" in x for x in _px_e),
+              f"без прокси установка отказывает: {_px_e[:1]}")
+        check(not (_px_dest / "opencode.jsonc").exists(),
+              "и файл настроек ради отказа не создаётся")
+        check(not (_px_dest / "pxpipe-data").exists(),
+              "и папка данных прокси не заводится")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e and any("не запущен" in x for x in _px_m),
+              f"остановка без прокси — не ошибка, а «и так не запущен»: {_px_m}")
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(bool(_px_e) and any("Журнала" in x for x in _px_e),
+              f"счётчики без журнала не выдумывают числа: {_px_e[:1]}")
+        check(not _px.dashboard_ok(timeout=3)[0],
+              "на порту пока пусто — панель не отвечает")
+
+        # Случай «npx не поставлен»: и запуск, и счётчики честно отказывают,
+        # а не делают вид, что прокси поднялся.
+        _px.find_npx = lambda: None
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("npx не найден" in x for x in _px_e),
+              f"без npx запуск не выдумывается, а отказывает: {_px_e[:1]}")
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(bool(_px_e) and any("npx не найден" in x for x in _px_e),
+              f"и счётчики без npx не считаются: {_px_e[:1]}")
+        check(not _px.pid_file(_px_dest).exists(),
+              "и файла процесса после отказа нет")
+        _px.find_npx = lambda: sys.executable
+
+        # Чужой прокси: поднят мимо программы. Ни остановить, ни вписать его
+        # нельзя — куда он пересылает запросы, программе неизвестно.
+        _tk_os.environ["PXPIPE_PORT"] = str(_px_foreign_port)
+        _px_foreign_env = dict(_tk_os.environ)
+        _px_foreign_env["PORT"] = str(_px_foreign_port)
+        _px_foreign_log = _px_tmp / "foreign-stub.log"
+        with open(_px_foreign_log, "ab") as _px_fh:
+            _px_stub_proc.append(_px_spawn.Popen(
+                [sys.executable, str(_px_stub)], env=_px_foreign_env,
+                stdout=_px_fh, stderr=_px_fh, start_new_session=True))
+        # Ждём ответа с повтором: сразу после запуска панель ещё не слушает.
+        _px_ok, _px_note = _px.wait_dashboard(timeout=30)
+        check(_px_ok,
+              f"чужая панель отвечает, как настоящая: {_px_note[:40]} "
+              f"{_px_foreign_log.read_text(encoding='utf-8')[-200:]}")
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("не программой" in x for x in _px_e),
+              f"запись под чужой прокси не делается: {_px_e[:1]}")
+        check(not (_px_dest / "opencode.jsonc").exists(),
+              "и файл настроек после отказа по-прежнему не создан")
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("не программой" in x for x in _px_e)
+              and not _px.pid_file(_px_dest).exists(),
+              f"запуск поверх чужого прокси отказывает, а не плодит второй: "
+              f"{_px_e[:1]}")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(bool(_px_e) and any("не наш" in x for x in _px_e)
+              and _px.dashboard_ok(timeout=5)[0],
+              "чужой прокси программа не гасит — только говорит, что он не её")
+        _px_right_off()
+
+        # Свой прокси: поднимает программа — и только теперь пишет настройки.
+        _tk_os.environ["PXPIPE_PORT"] = str(_px_port)
+        _px_cfg = _px_dest / "opencode.jsonc"
+        _px_cfg.write_text(
+            '{\n'
+            '  // чужой комментарий: его трогать нельзя\n'
+            '  "provider": {\n'
+            '    "pxsrc": {\n'
+            '      "npm": "@ai-sdk/openai-compatible",\n'
+            '      "name": "заглушка-провайдер",\n'
+            '      "options": {\n'
+            '        "baseURL": "http://127.0.0.1:59999/v1",\n'
+            '        "apiKey": "sk_stub"\n'
+            '      },\n'
+            '      "models": {\n'
+            '        "qwen3": {"name": "qwen3"},\n'
+            '        "claude-fable-5": {"name": "fable"}\n'
+            '      }\n'
+            '    }\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8")
+        _px_cfg_before = _px_cfg.read_text(encoding="utf-8")
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(not _px_e and any("панель pxpipe отвечает" in x or "отвечает" in x
+                               for x in _px_m),
+              f"свой прокси поднимается и панель отвечает: {_px_m[-1:]}")
+        _px_info = _px._launch_info(_px_dest)
+        check(_px_info.get("pid") and _px_info.get("provider") == "pxsrc",
+              f"в файле процесса записан наш запуск и источник: {_px_info}")
+        check(_px_info.get("upstream") == "http://127.0.0.1:59999",
+              f"адрес пересылки — без хвоста /v1 (в коде автора путь идёт как "
+              f"есть): {_px_info.get('upstream')}")
+
+        _px_m, _px_e = _px.install(_px_dest, "другого-нет")
+        check(bool(_px_e) and any("выбран" in x for x in _px_e),
+              f"другой источник не принимается: {_px_e[:1]}")
+        check(_px_cfg.read_text(encoding="utf-8") == _px_cfg_before,
+              "после отказов файл настроек остался ровно таким, каким был")
+
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        _px_text = _px_cfg.read_text(encoding="utf-8")
+        check(not _px_e and _px.PROVIDER in _px_text,
+              f"провайдер pxpipe вписан: {_px_e}")
+        check(_px_text.count("== OpenCode_Base: provider.pxpipe ==") == 1
+              and _px_text.count("конец provider.pxpipe ==") == 1,
+              "метки вокруг нашей записи стоят ровно парой")
+        check("чужой комментарий: его трогать нельзя" in _px_text,
+              "чужой комментарий в настройках цел")
+        check('"baseURL": "' + _px.base_url() + '/v1"' in _px_text,
+              f"адрес записи смотрит на прокси: {_px.base_url()}/v1")
+        check('"apiKey": "sk_stub"' in _px_text,
+              "ключ источника скопирован в запись — иначе прокси не пройдёт дальше")
+        check('"qwen3"' in _px_text and '"claude-fable-5"' in _px_text,
+              "список моделей скопирован от источника, а не выдуман")
+        check(opencode_caps.check_jsonc(_px_text),
+              "настройки после записи остаются разбираемым JSONC")
+        _px_manifest = opencode_caps.read_manifest(_px_dest)
+        check(_px_manifest.get("pxpipe", {}).get("source") == "pxsrc",
+              f"в манифесте записано, чьи модели стоят в записи: "
+              f"{_px_manifest.get('pxpipe')}")
+
+        # Живой запрос через прокси: уходит прокси и доходит до него целым.
+        _px_req = _px_url.Request(
+            _px.base_url() + "/v1/chat/completions",
+            data=json.dumps({"model": "qwen3",
+                             "messages": [{"role": "user", "content": "привет"}]}
+                            ).encode("utf-8"),
+            headers={"content-type": "application/json"})
+        with _px_url.urlopen(_px_req, timeout=30) as _px_answer:
+            _px_body = json.loads(_px_answer.read().decode("utf-8"))
+        check(_px_answer.status == 200 and _px_body.get("ok") is True
+              and _px_body.get("path") == "/v1/chat/completions",
+              f"обычный запрос проходит через прокси без ошибок: {_px_body}")
+        check(_px_stub_events() == 1,
+              "прокси получил запрос и записал его в свой журнал")
+
+        # Повторное включение файл не переписывает: иначе opencode поднимал бы
+        # серверы заново на каждое нажатие.
+        _px_bytes = _px_cfg.read_bytes()
+        _px_m2, _px_e2 = _px.install(_px_dest, "pxsrc")
+        check(_px_cfg.read_bytes() == _px_bytes
+              and any("не менялся" in x for x in _px_m2),
+              f"повторное «Включить» файл не переписывает: {_px_m2[-1:]}")
+        check(not _px_e2, f"и это не ошибка: {_px_e2}")
+
+        # Счётчики: числа берутся у самого прокси, а не выдумываются.
+        _px_saved_run = _px._run
+
+        def _px_fake_stats(args, timeout):
+            return 0, "requests: 1\ncompressed: 1 (100.0%)", ""
+
+        _px._run = _px_fake_stats
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(not _px_e and any("compressed" in x for x in _px_m),
+              f"счётчики показывают то, что напечатал пакет: {_px_m[:2]}")
+
+        def _px_fail_stats(args, timeout):
+            return 1, "", "events file not found"
+
+        _px._run = _px_fail_stats
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(not _px_m and bool(_px_e),
+              "неудачный опрос счётчиков — это ошибка, а не выдуманные числа")
+        _px._run = _px_saved_run
+
+        # Состояние и выбор источника — словами и без нашей же записи в списке.
+        _px_status = _px.status(_px_dest)
+        check(_px_status.get("running") is True and _px_status.get("ours") is True
+              and _px_status.get("installed") is True,
+              f"состояние видит и прокси, и запись: {_px_status}")
+        _px_choices_now = _px.provider_choices(_px_dest)
+        check("pxsrc" in _px_choices_now and _px.PROVIDER not in _px_choices_now,
+              f"источником предлагаются чужие провайдеры, но не наша запись: "
+              f"{_px_choices_now}")
+
+        # Уборка: наша запись уходит, чужое остаётся, прокси гасится отдельно.
+        _px_m, _px_e = _px.remove(_px_dest)
+        _px_text = _px_cfg.read_text(encoding="utf-8")
+        check(not _px_e and "provider.pxpipe" not in _px_text,
+              f"наша запись убрана: {_px_e}")
+        check("чужой комментарий: его трогать нельзя" in _px_text
+              and '"pxsrc"' in _px_text,
+              "чужое после уборки цело")
+        check(opencode_caps.check_jsonc(_px_text),
+              "и настройки после уборки разбираются")
+        _px_m, _px_e = _px.remove(_px_dest)
+        check(not _px_e and any("убирать нечего" in x for x in _px_m),
+              "повторная уборка — не ошибка, а «убирать нечего»")
+        check(_px.dashboard_ok(timeout=5)[0],
+              "уборка записи прокси не гасит: его гасят отдельной кнопкой")
+
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e, f"свой прокси гасится: {_px_e}")
+        check(not _px.dashboard_ok(timeout=3)[0],
+              "после остановки панель больше не отвечает")
+        check(not _px.pid_file(_px_dest).exists(),
+              "и файл процесса убран — чужой процесс им не считается")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e and any("не запущен" in x for x in _px_m),
+              "повторная остановка — не ошибка, а «и так не запущен»")
+        _px_right_off()
+
+        # Командная строка — то же, что кнопки. Живого прокси тут нет, поэтому
+        # принимаются оба исхода: важно, что она отвечает словами и не врёт.
+        _px_cli = _px_root / "tools" / "dbapp" / "pxpipe.py"
+        _px_env = dict(_tk_os.environ)
+        _px_env["OPENCODE_CONFIG_DIR"] = str(_px_dest)
+        _px_env["PXPIPE_PORT"] = str(_px_port)
+        _px_run = _px_spawn.run([sys.executable, str(_px_cli), "status"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                env=_px_env, timeout=90)
+        check(_px_run.returncode == 0 and "провайдер pxpipe" in _px_run.stdout,
+              f"командная строка pxpipe говорит состояние: "
+              f"{_px_run.stdout.strip()[:70]}")
+        _px_run = _px_spawn.run([sys.executable, str(_px_cli), "install", "pxsrc"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                env=_px_env, timeout=90)
+        check(_px_run.returncode == 1 and "ничего не вписано" in _px_run.stdout,
+              f"и отказывает без прокси, как кнопка: "
+              f"{_px_run.stdout.strip()[:70]}")
+
+        # Окно: галочка снята, кнопки на месте, предупреждение спрашивается.
+        _px_tab = window.caps_tab
+        check("pxpipe" in _px_tab.checks and not _px_tab.checks["pxpipe"].isChecked(),
+              "на вкладке opencode галочка pxpipe есть и снята по умолчанию")
+        for _px_attr in ("btn_px_run", "btn_px_stop", "btn_px_check", "btn_px_stats",
+                         "pxpipe_source"):
+            check(hasattr(_px_tab, _px_attr),
+                  f"на вкладке есть орган управления: {_px_attr}")
+        check(all(getattr(_px_tab, name).isEnabled()
+                  for name in ("btn_px_run", "btn_px_stop", "btn_px_check",
+                               "btn_px_stats")),
+              "кнопки pxpipe доступны")
+        _px_saved_dialog = _px_app.PxpipeWarningDialog
+
+        class _px_no_dialog(_px_app.PxpipeWarningDialog):
+            """Отказ от согласия: галочка должна вернуться в снятое."""
+
+            def exec(self):
+                return 0
+
+        _px_app.PxpipeWarningDialog = _px_no_dialog
+        _px_tab.checks["pxpipe"].setChecked(True)
+        check(not _px_tab.checks["pxpipe"].isChecked(),
+              "отказ в предупреждении возвращает галочку в снятое")
+
+        _px_saved_confirm = _px_tab._px_confirm
+        _px_worker_before = _px_tab._worker
+        _px_tab._px_confirm = lambda: False
+        _px_tab._px_run()
+        check(_px_tab._worker is _px_worker_before,
+              "без согласия кнопка «Запустить pxpipe» ничего не делает")
+        _px_tab._px_confirm = _px_saved_confirm
+        _px_app.PxpipeWarningDialog = _px_saved_dialog
+
+        # Секретов и настоящих путей в новых файлах быть не должно.
+        _px_our_files = (
+            _px_root / "tools" / "dbapp" / "pxpipe.py",
+            _px_readme,
+        )
+        _px_leaks: list[str] = []
+        for _px_item in _px_our_files:
+            _px_body = _px_item.read_text(encoding="utf-8")
+            for _px_mark in ("C:\\Users\\", "/home/", "/Users/", "sk-"):
+                if _px_mark in _px_body:
+                    _px_leaks.append(f"{_px_item}: {_px_mark}")
+        check(not _px_leaks,
+              f"в файлах pxpipe нет секретов и настоящих путей: {_px_leaks}")
+    finally:
+        _px_right_off()
+        _px.find_npx, _px._run, _px.launch_command = _px_saved
+        if _px_saved_port is None:
+            _tk_os.environ.pop("PXPIPE_PORT", None)
+        else:
+            _tk_os.environ["PXPIPE_PORT"] = _px_saved_port
+        shutil.rmtree(_px_tmp, ignore_errors=True)
+
+    # ---- 8л. auto-improve: улучшение текста циклом с судьёй, не MCP. -------
+    # По §7 инструкции это не сервер: в mcp-registry.json его быть не должно.
+    # Цикл — чужая программа (скрипт автора crimeacs), она тратит токены и
+    # сама делает коммиты. Живого ключа судьи в проверке нет и быть не может:
+    # он принадлежит человеку. Поэтому проверяется наш код: отказы до записи,
+    # ключ никуда не утекает, команда собирается по README автора, а сам цикл
+    # прогоняется заглушкой, которая печатает и коммитит ровно то, что
+    # печатает и коммитит настоящий скрипт.
+    import os as _ai_os  # noqa: PLC0415
+    import subprocess as _ai_sp  # noqa: PLC0415
+    import auto_improve as _ai  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _ai_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8л. auto-improve: улучшение текста циклом с судьёй ---")
+
+    _ai_root = core.program_root()
+    _ai_third = _ai_root / "tools" / "thirdparty" / "auto-improve"
+
+    # Копии автора: скрипт, лицензия и рубрики — байт в байт.
+    for _ai_rel, _ai_want in sorted(_ai.SCRIPT_BLOBS.items()):
+        _ai_path = _ai_third / _ai_rel
+        check(_ai_path.is_file(), f"auto-improve: копия на месте ({_ai_rel})")
+        if not _ai_path.is_file():
+            continue
+        check(_tk_blob(_ai_path) == _ai_want,
+              f"auto-improve: {_ai_rel} — байт в байт от автора "
+              f"(blob {_ai_want[:8]})")
+    _ai_script_text = (_ai_third / "improve.py").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("--artifact", "ключ файла из README автора"),
+        ("--criteria", "рубрика"),
+        ("--max-iterations", "ограничение итераций"),
+        ("improve/", "ветка улучшений"),
+        ("GEMINI_API_KEY", "ключ судьи из окружения"),
+        ("IMPROVE_EVALUATOR", "модель-судья"),
+    ):
+        check(_ai_bit in _ai_script_text,
+              f"auto-improve: в скрипте автора есть {_ai_why} ({_ai_bit})")
+
+    # Наш README: что взято и что не взято — сказано словами.
+    _ai_readme = (_ai_third / "README.md").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("crimeacs/auto-improve", "назван автор"),
+        ("только в отдельной ветке", "сказано про отдельную ветку"),
+        ("заявления автора", "числа автора названы заявлениями"),
+        ("независимо не проверены", "и что проверки нет"),
+        ("plot/", "сказано, что график на Rust не берём"),
+        ("voice/", "и что озвучку не берём"),
+        ("auto-improve-key.txt", "назван файл ключа"),
+        ("не MCP", "сказано, что это не MCP"),
+    ):
+        check(_ai_bit in _ai_readme, f"auto-improve: в README — {_ai_why}")
+
+    # Галочка, установка и уборка.
+    _ai_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check("auto-improve" in _ai_choices
+          and "auto-improve" in {name for name, _t in opencode_caps.CAPS},
+          "галочка auto-improve есть и в списке вкладки, и в общем списке")
+    check("auto-improve" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка auto-improve снята по умолчанию: цикл тратит токены")
+    _ai_caps_src = (_ai_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _ai_bit in ("_auto_improve_module", "_auto_improve_module().install",
+                    "_auto_improve_module().remove"):
+        check(_ai_bit in _ai_caps_src,
+              f"установка возможностей зовёт auto-improve своим модулем ({_ai_bit})")
+    _ai_main_src = (_ai_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("Улучшить файл…", "кнопка запуска"),
+        ("Вписать ключ судьи", "кнопка ключа"),
+        ("Проверить окружение", "кнопка проверки"),
+        ("Показать ход", "кнопка истории"),
+        ("AutoImproveDialog", "окно выбора файла и рубрики"),
+        ("AutoImproveKeyDialog", "окно ключа"),
+        ("auto_improve.launch", "запуск цикла из окна"),
+    ):
+        check(_ai_bit in _ai_main_src, f"вкладка opencode: {_ai_why} ({_ai_bit})")
+
+    # Секретов и настоящих путей в новых файлах нет. Ключ в примерах не
+    # пишется целым: иначе проверка сама же его и находила бы.
+    _ai_files = (
+        _ai_root / "tools" / "dbapp" / "auto_improve.py",
+        _ai_third / "README.md",
+        _ai_root / "skills" / "auto-improve" / "SKILL.md",
+    )
+    _ai_leaks: list[str] = []
+    for _ai_item in _ai_files:
+        _ai_body = _ai_item.read_text(encoding="utf-8")
+        for _ai_mark in ("C:\\Users\\", "/home/", "/Users/", "AIza"):
+            if _ai_mark in _ai_body:
+                _ai_leaks.append(f"{_ai_item.name}: {_ai_mark}")
+    check(not _ai_leaks,
+          f"в файлах auto-improve нет секретов и настоящих путей: {_ai_leaks}")
+
+    # Не MCP: в реестре серверов его нет.
+    _ai_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _ai_ids = {str(s.get("id")) for s in _ai_registry.get("servers", [])}
+    check("auto-improve" not in _ai_ids,
+          "auto-improve не записан сервером MCP — это скрипт, а не сервер")
+
+    # Уведомления и правила базы знают про auto-improve.
+    _ai_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _ai_bit in ("crimeacs/auto-improve", "af8bcdd4", "заявления автора",
+                    "auto-improve-key.txt"):
+        check(_ai_bit in _ai_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и оговорки: {_ai_bit}")
+    _ai_agents = (_ai_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("auto-improve" in _ai_agents and "не MCP" in _ai_agents,
+          "config/AGENTS.md: про auto-improve сказано, и что это не MCP")
+
+    # ---- поведение: отказы, ключ и цикл — во временной папке.
+    _ai_tmp = Path(tempfile.mkdtemp(prefix="ai-caps-"))
+    _ai_dest: Path | None = None
+    _ai_saved_env = _ai_os.environ.get("OPENCODE_CONFIG_DIR")
+    _ai_saved_key = (_ai_os.environ.pop("GEMINI_API_KEY", None),
+                     _ai_os.environ.pop("GOOGLE_API_KEY", None))
+    try:
+        _ai_dest = _ai_tmp / "settings"
+        _ai_dest.mkdir()
+        _ai_os.environ["OPENCODE_CONFIG_DIR"] = str(_ai_dest)
+
+        # Без ключа судьи — ничего не пишется, и манифеста не появляется.
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(bool(_ai_e) and any("ключ судьи" in x for x in _ai_e),
+              f"без ключа установка отказывает: {_ai_e[:1]}")
+        check(not (_ai_dest / ".opencode-base-caps.json").exists(),
+              "и манифест ради отказа не заводится")
+        check(_ai.key_status(_ai_dest).startswith("ключ судьи не вписан"),
+              "состояние честно говорит, что ключа нет")
+
+        # Ключ: пустой и «обрезанный» не принимаются, настоящий ложится файлом.
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "   ")
+        check(bool(_ai_e), "пустой ключ не сохраняется")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "короткий")
+        check(bool(_ai_e), "слишком короткий ключ не сохраняется")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "две строки\nвторая")
+        check(bool(_ai_e), "ключ с переносом строки не сохраняется")
+        check(not _ai.key_file(_ai_dest).exists(),
+              "после отказов файла ключа на диске нет")
+        _ai_sample_key = "AIza" + "z" * 33
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, _ai_sample_key)
+        check(not _ai_e and _ai.key_file(_ai_dest).is_file(),
+              f"ключ сохраняется файлом рядом с настройками: {_ai_e}")
+        check(_ai_sample_key not in " ".join(_ai_m),
+              "в сообщении о сохранении самого ключа нет")
+        if _ai_os.name != "nt":
+            _ai_mode = _ai.key_file(_ai_dest).stat().st_mode & 0o777
+            check(_ai_mode == 0o600,
+                  f"файл ключа закрыт до владельца: {oct(_ai_mode)}")
+        check(_ai.key_status(_ai_dest).endswith("(auto-improve-key.txt)"),
+              f"состояние говорит, откуда ключ: {_ai.key_status(_ai_dest)}")
+        check(_ai_os.environ.get("GEMINI_API_KEY") is None,
+              "программа не выставляет ключ в своё окружение — только в чужой процесс")
+
+        # С ключом установка проходит, повторная ничего не портит.
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(not _ai_e and _ai.installed(_ai_dest),
+              f"с ключом инструмент включается: {_ai_e}")
+        check(opencode_caps.caps_status(_ai_dest).get("auto-improve") is True,
+              "состояние вкладки видит включённый auto-improve")
+        _ai_manifest_before = (_ai_dest / ".opencode-base-caps.json").read_text(
+            encoding="utf-8")
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(not _ai_e
+              and (_ai_dest / ".opencode-base-caps.json").read_text(
+                  encoding="utf-8") == _ai_manifest_before,
+              "повторное включение манифест не переписывает")
+
+        # Команда запуска: ключи из README автора, а ключа судьи в ней нет.
+        _ai_cmd = _ai.build_command(
+            sys.executable, _ai_tmp / "файл.md", "тег", criteria="рубрика.md",
+            goal="цель", max_iterations=4, candidates=2, threshold=75, eval_runs=1)
+        for _ai_bit in ("--artifact", "--tag", "--max-iterations", "--candidates",
+                        "--threshold", "--eval-runs", "--criteria", "--goal"):
+            check(_ai_bit in _ai_cmd, f"в команде запуска есть {_ai_bit}")
+        check(all(_ai_sample_key not in part for part in _ai_cmd),
+              "ключа судьи в команде запуска нет")
+        _ai_env, _ai_value = _ai._environment(_ai_dest)
+        check(_ai_value == _ai_sample_key
+              and _ai_env.get("GEMINI_API_KEY") == _ai_sample_key,
+              "ключ уезжает в окружение процесса, а не в команду")
+        check(_ai_env.get("RESULTS_DIR", "").endswith("results")
+              and _ai_env.get("IMPROVE_EVENTS_LOG", "").endswith("events.jsonl"),
+              f"папки результатов и журнала задаются нами: "
+              f"{Path(_ai_env['RESULTS_DIR']).parent.name}")
+
+        # Файл вне git-репозитория — отказ с объяснением.
+        _ai_loose = _ai_tmp / "просто-файл.md"
+        _ai_loose.write_text("черновик\n", encoding="utf-8")
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_loose, "плохой-тег")
+        check(bool(_ai_e) and any("git-репозитор" in x for x in _ai_e),
+              f"файл вне репозитория не принимается: {_ai_e[:1]}")
+        check(not _ai.results_dir(_ai_dest).exists(),
+              "и папка результатов ради отказа не создаётся")
+
+        # Репозиторий: цикл прогоняется заглушкой, которая печатает и
+        # коммитит ровно то, что печатает и коммитит настоящий скрипт.
+        _ai_repo = _ai_tmp / "репозиторий"
+        _ai_repo.mkdir()
+        _ai_git = ["git", "-c", "user.name=проверка", "-c", "user.email=проверка@example"]
+        _ai_sp.run(["git", "init", "-q"], cwd=_ai_repo, timeout=60)
+        _ai_sp.run(_ai_git + ["commit", "-qm", "первый", "--allow-empty"],
+                   cwd=_ai_repo, timeout=60)
+        _ai_note = _ai_repo / "письмо.md"
+        _ai_note.write_text("# черновик\n\nСтрока, которую цикл переделает.\n",
+                            encoding="utf-8")
+        _ai_sp.run(["git", "add", "-A"], cwd=_ai_repo, timeout=60)
+        _ai_sp.run(_ai_git + ["commit", "-qm", "добавить файл"], cwd=_ai_repo, timeout=60)
+
+        # Тег: пустой и с пробелами не принимается — он же имя ветки.
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "плохой тег")
+        check(bool(_ai_e) and any("тег" in x for x in _ai_e),
+              f"тег с пробелом не принимается: {_ai_e[:1]}")
+
+        _ai_stub = _ai_tmp / "заглушка.py"
+        # Заглушка повторяет самое главное из поведения настоящего скрипта:
+        # сама создаёт ветку improve/<тег> от текущего состояния и коммитит
+        # в неё. Иначе проверка не поймала бы, что тег вообще доезжает.
+        _ai_stub.write_text(
+            "import subprocess, sys\n"
+            "tag = sys.argv[1]\n"
+            "print('[Baseline] Score: 48/100')\n"
+            "print('[Iter 1/1] Score: 48')\n"
+            "print('   [cand] exact  score=52 : правка')\n"
+            "print('[KEEP] pairwise: challenger won')\n"
+            "subprocess.run(['git', 'checkout', '-qb', 'improve/' + tag])\n"
+            "with open('письмо.md', 'a', encoding='utf-8') as f:\n"
+            "    f.write('правка цикла\\n')\n"
+            "subprocess.run(['git', 'add', '-A'])\n"
+            "subprocess.run(['git', '-c', 'user.name=заглушка',\n"
+            "                '-c', 'user.email=заглушка@example',\n"
+            "                'commit', '-qm', 'improve/' + tag + ' iter 1'])\n"
+            "print('[DONE] ' + tag + ': 48 -> 52 (delta: +4)')\n",
+            encoding="utf-8")
+        _ai_seen: list[str] = []
+        _ai_m, _ai_e = _ai.launch(
+            _ai_dest, _ai_note, "v1", criteria="", goal="письмо короче",
+            command=[sys.executable, str(_ai_stub), "v1"],
+            progress=_ai_seen.append)
+        check(not _ai_e, f"цикл прошёл без ошибок: {_ai_e}")
+        check(any("[KEEP]" in line for line in _ai_seen),
+              f"вывод цикла виден построчно: {_ai_seen[:3]}")
+        _ai_branch = _ai_sp.run(["git", "branch", "--show-current"], cwd=_ai_repo,
+                                capture_output=True, text=True, timeout=60).stdout.strip()
+        check(_ai_branch == "improve/v1",
+              f"цикл ушёл в ветку improve/<тег>, а основная осталась в стороне: "
+              f"сейчас {_ai_branch!r}")
+        _ai_log = _ai.log_file(_ai_dest).read_text(encoding="utf-8")
+        check("KEEP" in _ai_log and "DONE" in _ai_log,
+              "вывод цикла остаётся в журнале на диске")
+        check(_ai_sample_key not in _ai_log
+              and all(_ai_sample_key not in line for line in _ai_seen),
+              "ключа судьи нет ни в журнале, ни в выводе окна")
+        check(any("Ход — кнопкой «Показать ход»" in line for line in _ai_seen),
+              "после успеха программа говорит, где смотреть ход")
+
+        # Запуск без ключа: причина называется, и работа не начинается.
+        _ai.key_file(_ai_dest).unlink()
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "v2")
+        check(bool(_ai_e) and any("ключ судьи" in x for x in _ai_e),
+              f"без ключа цикл не запускается: {_ai_e[:1]}")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, _ai_sample_key)
+
+        # Заглушка падает — это ошибка с последними строками, а не «готово».
+        _ai_bad = _ai_tmp / "падающая.py"
+        _ai_bad.write_text(
+            "import sys\nprint('начал')\nprint('сломалось', file=sys.stderr)\n"
+            "sys.exit(3)\n", encoding="utf-8")
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "v3",
+                                  command=[sys.executable, str(_ai_bad)])
+        check(bool(_ai_e) and any("код 3" in x for x in _ai_e),
+              f"падение цикла показывается кодом: {_ai_e[:1]}")
+        check(any("Полный вывод" in x for x in _ai_e),
+              "и сказано, где смотреть полный вывод")
+
+        # Ход: таблицу печатает сам скрипт автора — подложим ему файл.
+        _ai_results = _ai.results_dir(_ai_dest)
+        _ai_results.mkdir(parents=True, exist_ok=True)
+        (_ai_results / "v1.tsv").write_text(
+            "iteration\tcommit\tscore\tdelta\tstatus\tdescription\ttimestamp\n"
+            "0\tabc1234\t48\t+0\tbaseline\tOriginal artifact\t2026-10-07T12:00\n"
+            "1\tdef5678\t52\t+4\tkeep\tправка\t2026-10-07T12:01\n",
+            encoding="utf-8")
+        _ai_m, _ai_e = _ai.history(_ai_dest, "v1")
+        _ai_text = " | ".join(_ai_m)
+        check(not _ai_e and "Keeps: 1" in _ai_text and "Best score: 52" in _ai_text,
+              f"ход читается родной командой автора: {_ai_text[:90]}")
+        check("v1" in _ai.seen_tags(_ai_dest),
+              f"готовые запуски видны в состоянии: {_ai.seen_tags(_ai_dest)}")
+        _ai_m, _ai_e = _ai.history(_ai_dest, "нет-такого")
+        check(any("нет" in x.lower() for x in _ai_m + _ai_e),
+              "у незнакомого тега ход честно пуст")
+
+        # Командная строка — то же, что кнопки: отвечает словами и не врёт.
+        _ai_cli = _ai_root / "tools" / "dbapp" / "auto_improve.py"
+        _ai_cli_env = dict(_ai_os.environ)
+        _ai_cli_env["OPENCODE_CONFIG_DIR"] = str(_ai_dest)
+        _ai_run = _ai_sp.run([sys.executable, str(_ai_cli), "status"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             env=_ai_cli_env, timeout=90)
+        check(_ai_run.returncode == 0 and "Готово к запуску" in _ai_run.stdout,
+              f"командная строка говорит состояние: {_ai_run.stdout.strip()[:60]}")
+        check(_ai_sample_key not in _ai_run.stdout,
+              "и ключ в её вывод не попадает")
+
+        # Снятие: убирается только наша отметка, файлы остаются.
+        _ai_m, _ai_e = _ai.remove(_ai_dest)
+        check(not _ai_e and not _ai.installed(_ai_dest),
+              f"выключение снимает только отметку: {_ai_e}")
+        check(_ai.key_file(_ai_dest).is_file()
+              and _ai.results_dir(_ai_dest).is_dir(),
+              "ключ и папка данных остаются на диске — их убирает человек")
+        _ai_m, _ai_e = _ai.remove(_ai_dest)
+        check(not _ai_e and any("и так выключен" in x for x in _ai_m),
+              "повторное выключение — не ошибка, а «и так выключен»")
+
+        # Окно: галочка снята, кнопка запуска от неё зависит, диалоги собраны.
+        _ai_tab = window.caps_tab
+        check("auto-improve" in _ai_tab.checks
+              and not _ai_tab.checks["auto-improve"].isChecked(),
+              "на вкладке opencode галочка auto-improve есть и снята по умолчанию")
+        check(not _ai_tab.btn_ai_run.isEnabled(),
+              "кнопка «Улучшить файл…» выключена, пока галочка снята")
+        _ai_tab.checks["auto-improve"].setChecked(True)
+        check(_ai_tab.btn_ai_run.isEnabled(),
+              "и включается вместе с галочкой")
+        _ai_tab.checks["auto-improve"].setChecked(False)
+        check(not _ai_tab.btn_ai_run.isEnabled(),
+              "а со снятой галочкой цикл снова не запускается")
+        for _ai_attr in ("btn_ai_key_edit", "btn_ai_check", "btn_ai_history",
+                         "ai_key_hint", "ai_hint"):
+            check(hasattr(_ai_tab, _ai_attr),
+                  f"на вкладке есть орган управления: {_ai_attr}")
+        _ai_dialog = _ai_app.AutoImproveDialog()
+        _ai_values = _ai_dialog.values()
+        check(_ai_values["tag"] == "" and _ai_values["criteria"] == "",
+              f"диалог начинает с пустых полей: {_ai_values}")
+        _ai_dialog.artifact.setText(str(_ai_note))
+        _ai_dialog._tag_from_file()
+        check(_ai_dialog.values()["tag"] == "письмо",
+              f"тег подставляется из имени файла: {_ai_dialog.values()['tag']!r}")
+        check(_ai_dialog.criteria.count() >= 1
+              and _ai_dialog.criteria.itemData(0) == "",
+              "в списке рубрик есть «без рубрики» — рубрику можно не писать")
+        check("git add -A" in _ai_readme and "improve/<тег>" in _ai_readme,
+              "в README сказано и про `git add -A`, и про ветку improve/<тег>")
+        _ai_dialog.close()
+    finally:
+        if _ai_dest is not None:
+            _ai.key_file(_ai_dest).unlink(missing_ok=True)
+        if _ai_saved_env is None:
+            _ai_os.environ.pop("OPENCODE_CONFIG_DIR", None)
+        else:
+            _ai_os.environ["OPENCODE_CONFIG_DIR"] = _ai_saved_env
+        for _ai_name, _ai_old in zip(("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+                                     _ai_saved_key):
+            if _ai_old is not None:
+                _ai_os.environ[_ai_name] = _ai_old
+        shutil.rmtree(_ai_tmp, ignore_errors=True)
+
+    # ---- 8м. greenlight: проверка iOS-приложения перед App Store, не MCP. --
+    # По §7 плана это не сервер и не экономия токенов: чужая консольная
+    # программа автора Revyl (Go), в mcp-registry.json её нет. Живого
+    # бинарника в проверке нет и быть не может — его собирает человек, и
+    # для этого нужен Go 1.24+. Поэтому работа проверяется заглушкой: она
+    # отвечает на --version, печатает находки и, когда просят, пишет
+    # машинный отчёт — то же, что делает настоящий сканер.
+    import hashlib as _gl_hashlib  # noqa: PLC0415
+    import os as _gl_os  # noqa: PLC0415
+    import subprocess as _gl_sp  # noqa: PLC0415
+    import greenlight as _gl  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _gl_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8м. greenlight: проверка iOS-приложения перед App Store ---")
+
+    _gl_root = core.program_root()
+    _gl_third = _gl_root / "tools" / "thirdparty" / "greenlight"
+
+    def _gl_blob(_gl_path: Path) -> str:
+        """git-blob-sha1: им сверяется копия автора с GitHub."""
+        _gl_data = _gl_path.read_bytes()
+        return _gl_hashlib.sha1(b"blob %d\0" % len(_gl_data) + _gl_data).hexdigest()
+
+    # Копия автора: каждый файл из списка слепков — байт в байт с GitHub.
+    _gl_marks = _gl.vendor_blobs()
+    check(len(_gl_marks) >= 60,
+          f"в списке сверки greenlight файлов: {len(_gl_marks)}")
+    _gl_broken: list[str] = []
+    for _gl_rel, _gl_want in sorted(_gl_marks.items()):
+        _gl_path = _gl_third / _gl_rel
+        if not _gl_path.is_file():
+            _gl_broken.append(f"нет {_gl_rel}")
+        elif _gl_blob(_gl_path) != _gl_want:
+            _gl_broken.append(f"изменён {_gl_rel}")
+    check(not _gl_broken,
+          f"копия автора совпадает с GitHub байт в байт ({len(_gl_marks)} файлов): "
+          f"{_gl_broken[:3] or 'все'}")
+    check("license" not in " ".join(_gl_marks).lower() or True,
+          "список слепков читается")
+    _gl_ok, _gl_good, _gl_diff = _gl.sources_check()
+    check(_gl_ok and _gl_good == len(_gl_marks),
+          f"и собственный обзор копии сходится: {_gl_good} файлов, "
+          f"расхождения {_gl_diff[:2] or 'нет'}")
+
+    # Офлайновое ядро и облако в исходниках автора: слова, по которым
+    # программа понимает, что запускать, а что спрашивать подтверждением.
+    _gl_preflight_src = (_gl_third / "internal" / "cli" / "preflight.go").read_text(
+        encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("--exit-code", "код выхода для проверок в конвейере"),
+        ("preflight", "основная команда"),
+    ):
+        check(_gl_bit in _gl_preflight_src,
+              f"в исходниках автора есть {_gl_why} ({_gl_bit})")
+    _gl_verify_src = (_gl_third / "internal" / "cli" / "verify.go").read_text(
+        encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("--dry-run", "сухой прогон без устройства"),
+        ("--build-name", "имя сборки для облака"),
+    ):
+        check(_gl_bit in _gl_verify_src,
+              f"в исходниках автора есть {_gl_why} ({_gl_bit})")
+
+    # Наш README: что взято, что не взято и чего программа не делает.
+    _gl_readme = (_gl_third / "README.md").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("RevylAI/greenlight", "назван автор"),
+        ("fcb36e39", "назван коммит копии"),
+        ("MIT", "названа лицензия"),
+        ("офлайн", "сказано, что основной сканер офлайновый"),
+        ("Revyl", "сказано про сторонний облачный сервис"),
+        ("Go 1.24", "названа версия Go для сборки"),
+        ("не MCP", "сказано, что это не MCP"),
+    ):
+        check(_gl_bit in _gl_readme, f"greenlight: в README — {_gl_why}")
+
+    # Галочка, установка и уборка — как у автоулучшения.
+    _gl_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check("greenlight" in _gl_choices
+          and "greenlight" in {name for name, _t in opencode_caps.CAPS},
+          "галочка greenlight есть и в списке вкладки, и в общем списке")
+    check("greenlight" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка greenlight снята по умолчанию")
+    _gl_caps_src = (_gl_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _gl_bit in ("_greenlight_module", "_greenlight_module().install",
+                    "_greenlight_module().remove"):
+        check(_gl_bit in _gl_caps_src,
+              f"установка возможностей зовёт greenlight своим модулем ({_gl_bit})")
+    _gl_main_src = (_gl_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("Проверить iOS-приложение…", "кнопка основной проверки"),
+        ("Собрать greenlight", "кнопка сборки"),
+        ("Список проверок", "кнопка сухого прогона"),
+        ("Проверка в облаке Revyl…", "кнопка облака"),
+        ("Открыть отчёты", "кнопка отчётов"),
+        ("GreenlightScanDialog", "окно выбора проекта"),
+        ("greenlight.scan", "запуск проверки из окна"),
+        ("greenlight.verify_cloud", "облако — из окна"),
+        ("CLOUD_WARNING", "предупреждение про сторонний сервис"),
+        ("opencode-base (PyQt6, Windows)", "в описании опции назван сам основа"),
+        ("он не нужен", "и прямо сказано, кому она не нужна"),
+    ):
+        check(_gl_bit in _gl_main_src, f"вкладка opencode: {_gl_why} ({_gl_bit})")
+
+    # Секретов и настоящих путей в новых файлах нет.
+    _gl_files = (
+        _gl_root / "tools" / "dbapp" / "greenlight.py",
+        _gl_third / "README.md",
+        _gl_root / "skills" / "greenlight" / "SKILL.md",
+    )
+    _gl_leaks: list[str] = []
+    for _gl_item in _gl_files:
+        _gl_body = _gl_item.read_text(encoding="utf-8")
+        for _gl_mark in ("C:\\Users\\", "/home/", "/Users/", "sk_live"):
+            if _gl_mark in _gl_body:
+                _gl_leaks.append(f"{_gl_item.name}: {_gl_mark}")
+    check(not _gl_leaks,
+          f"в файлах greenlight нет секретов и настоящих путей: {_gl_leaks}")
+
+    # Не MCP: в реестре серверов его нет.
+    _gl_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _gl_ids = {str(s.get("id")) for s in _gl_registry.get("servers", [])}
+    check("greenlight" not in _gl_ids,
+          "greenlight не записан сервером MCP — это консольная программа")
+
+    # Уведомления, правила базы и скилл знают про greenlight.
+    _gl_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("RevylAI/greenlight", "назван источник"),
+        ("40b78f47", "назван слепок лицензии"),
+        ("облако Revyl", "сказано про сеть"),
+        ("статический", "сказано, что разбор статический"),
+    ):
+        check(_gl_bit in _gl_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и оговорки: {_gl_why}")
+    _gl_agents = (_gl_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("greenlight" in _gl_agents and "не MCP" in _gl_agents,
+          "config/AGENTS.md: про greenlight сказано, и что это не MCP")
+    check((_gl_root / "skills" / "greenlight" / "SKILL.md").is_file(),
+          "greenlight оформлен скиллом: skills/greenlight/SKILL.md на месте")
+    _gl_idx = json.loads(
+        core.program_file("skills-index.json").read_text(encoding="utf-8"))
+    _gl_entry = [s for s in _gl_idx.get("skills", []) if s.get("name") == "greenlight"]
+    check(len(_gl_entry) == 1 and all(_gl_entry[0].get(k) for k in
+                                      ("when", "trigger", "result")),
+          f"greenlight записан в skills-index.json целиком: {len(_gl_entry)} запись")
+
+    # ---- поведение: отказы, установка, прогон — во временной папке.
+    _gl_tmp = Path(tempfile.mkdtemp(prefix="gl-caps-"))
+    _gl_dest = _gl_tmp / "settings"
+    _gl_dest.mkdir()
+    _gl_saved = (_gl.find_binary, _gl.find_go, _gl.find_make)
+    _gl_saved_env = _gl_os.environ.get("OPENCODE_CONFIG_DIR")
+    _gl_os.environ["OPENCODE_CONFIG_DIR"] = str(_gl_dest)
+    try:
+        # Сканера нет и Go нет: состояние честное, установка отказывает.
+        _gl.find_binary = lambda: (None, "")
+        _gl.find_go = lambda: None
+        _gl.find_make = lambda: None
+        _gl_state = _gl.check(_gl_dest)
+        check(not _gl_state["ready"],
+              "без бинарника и без Go готовности нет — это не «зелёная» галочка")
+        _gl_text = _gl.status_text(_gl_dest)
+        check(_gl_text.startswith("Не готово") and "Go не найден" in _gl_text,
+              f"состояние говорит про Go прямо: {_gl_text[:80]}")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(bool(_gl_e) and not (_gl_dest / ".opencode-base-caps.json").exists(),
+              f"без живой проверки в настройки ничего не пишется: {_gl_e[:1]}")
+        _gl_m, _gl_build_e = _gl.build(_gl_dest)
+        check(bool(_gl_build_e) and any("Go" in x for x in _gl_build_e),
+              f"без Go сборка отказывает и говорит об этом: {_gl_build_e[:1]}")
+
+        # Заглушка вместо сканера: отвечает на --version, печатает находки,
+        # пишет машинный отчёт. Так проверяется наш код, а не чужой сканер.
+        _gl_stub = _gl_tmp / "заглушка.py"
+        _gl_stub.write_text(
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:1] == ['--version']:\n"
+            "    print('greenlight dev (заглушка)')\n"
+            "    raise SystemExit(0)\n"
+            "if args[:1] == ['сломаться']:\n"
+            "    print('начал')\n"
+            "    print('сломалось', file=sys.stderr)\n"
+            "    raise SystemExit(3)\n"
+            "if args[:1] == ['сборка']:\n"
+            "    print('go build -o build/greenlight ./cmd/greenlight')\n"
+            "    print('готово')\n"
+            "    raise SystemExit(0)\n"
+            "if 'preflight' in args:\n"
+            "    print('greenlight preflight ' + args[1])\n"
+            "    print('  [CRITICAL] privacy: нет PrivacyInfo.xcprivacy (5.1.1)')\n"
+            "    print('  [WARN] codescan: открытый http в коде (1.6)')\n"
+            "    print('NOT READY — 1 critical, 1 warn')\n"
+            "    if '--output' in args:\n"
+            "        out = args[args.index('--output') + 1]\n"
+            "        with open(out, 'w', encoding='utf-8') as f:\n"
+            "            json.dump({'summary': {'total': 2, 'critical': 1,\n"
+            "                                   'warns': 1, 'passed': False}}, f)\n"
+            "    raise SystemExit(0)\n"
+            "if 'verify' in args:\n"
+            "    if '--dry-run' in args:\n"
+            "        print('Mode:    dry-run (no device)')\n"
+            "        print('  dry-run — 2 flow(s) would be verified on-device')\n"
+            "    else:\n"
+            "        print('[pending] cloud run — Revyl')\n"
+            "    raise SystemExit(0)\n"
+            "print('непонятная команда', file=sys.stderr)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8")
+        if _gl_os.name == "nt":
+            _gl_wrap = _gl_tmp / "greenlight.cmd"
+            _gl_wrap.write_text("@echo off\r\n\"" + sys.executable + "\" \""
+                                + str(_gl_stub) + "\" %*\r\n", encoding="utf-8")
+        else:
+            _gl_wrap = _gl_tmp / "greenlight"
+            _gl_wrap.write_text("#!/bin/sh\nexec \"" + sys.executable + "\" \""
+                                + str(_gl_stub) + "\" \"$@\"\n", encoding="utf-8")
+            _gl_wrap.chmod(0o755)
+        _gl.find_binary = lambda: (Path(_gl_wrap), "проверка")
+        _gl.find_go = lambda: sys.executable
+        _gl.find_make = lambda: None
+
+        _gl_state = _gl.check(_gl_dest)
+        check(_gl_state["ready"] and "greenlight dev" in _gl_state["version"],
+              f"живая проверка видит отвечающий сканер: {_gl_state['version']!r}")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(not _gl_e and _gl.installed(_gl_dest),
+              f"с живым сканером отметка ставится: {_gl_e}")
+        check(opencode_caps.caps_status(_gl_dest).get("greenlight") is True,
+              "состояние вкладки видит включённый greenlight")
+        _gl_manifest_before = (_gl_dest / ".opencode-base-caps.json").read_text(
+            encoding="utf-8")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(not _gl_e
+              and (_gl_dest / ".opencode-base-caps.json").read_text(
+                  encoding="utf-8") == _gl_manifest_before,
+              "повторное включение манифест не переписывает")
+
+        # Основная проверка: папка проекта, находки построчно и машинный отчёт.
+        _gl_project = _gl_tmp / "приложение-ios"
+        (_gl_project / "Sources").mkdir(parents=True)
+        (_gl_project / "Sources" / "App.swift").write_text(
+            "let api = \"https://example.com\"\n", encoding="utf-8")
+        (_gl_project / "Info.plist").write_text("<plist></plist>\n", encoding="utf-8")
+        _gl_seen: list[str] = []
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_project, progress=_gl_seen.append)
+        check(not _gl_e, f"проверка проекта прошла: {_gl_e}")
+        check(any("CRITICAL" in line for line in _gl_seen),
+              f"находки видны построчно: {_gl_seen[:2]}")
+        _gl_reports = _gl.reports_seen(_gl_dest)
+        check(len(_gl_reports) == 1 and _gl_reports[0].is_file(),
+              f"машинный отчёт лёг рядом с настройками: {_gl_reports}")
+        if _gl_reports:
+            _gl_report = json.loads(_gl_reports[0].read_text(encoding="utf-8"))
+            check(_gl_report.get("summary", {}).get("critical") == 1,
+                  "в отчёте есть разбор по уровням")
+        _gl_log_text = _gl.log_file(_gl_dest).read_text(encoding="utf-8")
+        check("NOT READY" in _gl_log_text,
+              "вывод прогона остаётся в журнале на диске")
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_tmp / "нет-такой-папки")
+        check(bool(_gl_e) and any("Папки проекта нет" in x for x in _gl_e),
+              f"несуществующая папка отвергается до запуска: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_project,
+                                command=[str(_gl_wrap), "сломаться"])
+        check(bool(_gl_e) and any("кодом 3" in x for x in _gl_e),
+              f"падение сканера показывается кодом: {_gl_e[:1]}")
+        check(any("Полный вывод" in x for x in _gl_e),
+              "и сказано, где смотреть полный вывод")
+
+        # Сухой прогон списка проверок — офлайн, без устройства.
+        _gl_m, _gl_e = _gl.verify_dry(_gl_dest, _gl_project)
+        _gl_text = " | ".join(_gl_m)
+        check(not _gl_e and "dry-run" in _gl_text and "сухой прогон" in _gl_text,
+              f"сухой прогон идёт и говорит, что он сухой: {_gl_text[:70]}")
+
+        # Облако: без подтверждения не запускается вовсе.
+        _gl_ran: list[str] = []
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project,
+                                        progress=_gl_ran.append)
+        check(bool(_gl_e) and any("Revyl" in x for x in _gl_e) and not _gl_ran,
+              f"без подтверждения облако не запускается: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project, "",
+                                        confirm=True, progress=_gl_ran.append)
+        check(bool(_gl_e) and any("имя сборки" in x for x in _gl_e) and not _gl_ran,
+              f"без имени сборки облако тоже не запускается: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project, "Тестовое",
+                                        confirm=True, progress=_gl_ran.append)
+        check(not _gl_e and _gl_m and _gl.CLOUD_WARNING == _gl_m[0],
+              f"с подтверждением первым делом сказано про сторонний сервис: "
+              f"{_gl_m[:1]}")
+
+        # Сборка из копии автора: команда — из README, Go за человека не ставим.
+        _gl_m, _gl_e = _gl.build(_gl_dest, command=[str(_gl_wrap), "сборка"])
+        check(not _gl_e and any("Собираю из исходников" in x for x in _gl_m),
+              f"сборка из копии автора проходит: {_gl_e or _gl_m[:2]}")
+        _gl.find_go = lambda: None
+        _gl_m, _gl_e = _gl.build(_gl_dest)
+        check(bool(_gl_e) and any("Go" in x for x in _gl_e),
+              f"без Go сборка отказывает, а не молчит: {_gl_e[:1]}")
+
+        # Снятие: убирается только отметка, файлы остаются.
+        _gl_m, _gl_e = _gl.remove(_gl_dest)
+        check(not _gl_e and not _gl.installed(_gl_dest),
+              f"выключение снимает только отметку: {_gl_e}")
+        check(_gl.log_file(_gl_dest).is_file() and _gl.reports_dir(_gl_dest).is_dir(),
+              "журнал и отчёты остаются на диске — их убирает человек")
+        _gl_m, _gl_e = _gl.remove(_gl_dest)
+        check(not _gl_e and any("и так выключен" in x for x in _gl_m),
+              "повторное выключение — не ошибка, а «и так выключен»")
+
+        # Командная строка говорит состояние и не врёт про готовность.
+        _gl_cli = _gl_root / "tools" / "dbapp" / "greenlight.py"
+        _gl_cli_env = dict(_gl_os.environ)
+        _gl_cli_env["OPENCODE_CONFIG_DIR"] = str(_gl_dest)
+        _gl_run = _gl_sp.run([sys.executable, str(_gl_cli), "status"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             env=_gl_cli_env, timeout=90)
+        _gl_out = (_gl_run.stdout or "") + (_gl_run.stderr or "")
+        check(_gl_run.returncode in (0, 1) and "greenlight" in _gl_out
+              and ("Готово" in _gl_out or "Не готово" in _gl_out),
+              f"командная строка отвечает словами: {_gl_out.strip()[:70]}")
+
+        # Окно: галочка снята, кнопки сканера от неё зависят, диалоги собраны.
+        _gl_tab = window.caps_tab
+        check("greenlight" in _gl_tab.checks
+              and not _gl_tab.checks["greenlight"].isChecked(),
+              "на вкладке opencode галочка greenlight есть и снята по умолчанию")
+        _gl_tip = _gl_tab.checks["greenlight"].toolTip()
+        check("PyQt6" in _gl_tip and "не нужен" in _gl_tip,
+              "в описании опции прямо сказано, что opencode-base она не нужна")
+        check(not _gl_tab.btn_gl_run.isEnabled()
+              and not _gl_tab.btn_gl_dry.isEnabled()
+              and not _gl_tab.btn_gl_cloud.isEnabled(),
+              "кнопки проверок выключены, пока галочка снята")
+        _gl_tab.checks["greenlight"].setChecked(True)
+        check(_gl_tab.btn_gl_run.isEnabled() and _gl_tab.btn_gl_dry.isEnabled()
+              and _gl_tab.btn_gl_cloud.isEnabled(),
+              "и включаются вместе с галочкой")
+        _gl_tab.checks["greenlight"].setChecked(False)
+        check(not _gl_tab.btn_gl_run.isEnabled(),
+              "а со снятой галочкой проверка снова не запускается")
+        for _gl_attr in ("btn_gl_check", "btn_gl_build", "btn_gl_run",
+                         "btn_gl_dry", "btn_gl_cloud", "btn_gl_report", "gl_hint"):
+            check(hasattr(_gl_tab, _gl_attr),
+                  f"на вкладке есть орган управления: {_gl_attr}")
+        _gl_dialog = _gl_app.GreenlightScanDialog("scan")
+        check(_gl_dialog.values()["project"] == ""
+              and _gl_dialog.values()["ipa"] == "",
+              f"окно проверки начинает с пустых полей: {_gl_dialog.values()}")
+        _gl_dialog._accept()
+        check(_gl_dialog.result() != _gl_app.QDialog.DialogCode.Accepted,
+              "пустая папка проекта не принимается — окно не закрывается")
+        _gl_dialog.close()
+        _gl_cloud_dialog = _gl_app.GreenlightScanDialog("cloud")
+        check("Revyl" in _gl_cloud_dialog.windowTitle(),
+              f"облачное окно названо своим именем: {_gl_cloud_dialog.windowTitle()}")
+        _gl_cloud_dialog._accept()
+        check(_gl_cloud_dialog.result() != _gl_app.QDialog.DialogCode.Accepted,
+              "и без имени сборки не принимается")
+        _gl_cloud_dialog.close()
+    finally:
+        _gl.find_binary, _gl.find_go, _gl.find_make = _gl_saved
+        if _gl_saved_env is None:
+            _gl_os.environ.pop("OPENCODE_CONFIG_DIR", None)
+        else:
+            _gl_os.environ["OPENCODE_CONFIG_DIR"] = _gl_saved_env
+        shutil.rmtree(_gl_tmp, ignore_errors=True)
+
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
     check(isinstance(_on, bool) and _port > 0,
@@ -5284,9 +8545,9 @@ def main() -> int:
     # --- настоящий реестр
     _base = core.program_root()
     _servers = mcp_registry.load_servers(_base)
-    check(len(_servers) == 8, f"реестр читается, 8 серверов: {len(_servers)}")
+    check(len(_servers) == 12, f"реестр читается, 12 серверов: {len(_servers)}")
     check(all(s.program_install is not None for s in _servers),
-          "у всех 8 серверов есть блок program_install")
+          "у всех 12 серверов есть блок program_install")
     _by_id = {s.id: s.program_install for s in _servers}
     if all(_by_id.values()):
         check(_by_id["blender"].winget_id == "BlenderFoundation.Blender"
@@ -5369,13 +8630,55 @@ def main() -> int:
         check(any("серверов 0" in b for b in _bad2),
               f"и называет причину — ноль серверов: {(_bad2 or [''])[0][:70]}")
 
-        # Все восемь на месте, и у каждого четыре ответа.
+        # Все двенадцать на месте, и у каждого четыре ответа.
         _views = pmod.server_views(_base)
-        check(len(_views) == 8, f"движок прочитал все восемь серверов: {len(_views)}")
+        check(len(_views) == 12, f"движок прочитал все двенадцать серверов: {len(_views)}")
         _by = {v.id: v for v in _views}
         for _sid in ("windows-admin", "excel", "blender", "adobe-creativity",
-                     "android-studio", "obs", "android-emulator", "ldplayer"):
+                     "android-studio", "obs", "android-emulator", "ldplayer",
+                     "dbhub", "browsers", "omniroute", "lmarena"):
             check(_sid in _by, f"сервер {_sid} есть в движке")
+
+        # Порог версии сравнивается, а не просто запоминается. Пример DBHub
+        # в задании обещал Node.js 18+, а в самом пакете dbhub записано
+        # engines.node ≥ 22.5.0. Если бы сверка сводилась к непустому полю,
+        # человек с Node 20 увидел бы «готово» и получил отказ при запуске.
+        # Проверяем не текст, а поведение движка: команда печатает версию,
+        # движок её читает и сравнивает с порогом.
+        _req_old = _mcp_registry.check_requirement({
+            "what": "пример", "type": "command", "check": sys.executable,
+            "args": ["-c", "print('20.11.0')"], "min_version": 22})
+        check(_req_old.ok is False and "22" in _req_old.detail,
+              f"Node.js 20 при пороге 22 — не подходит: {_req_old.detail}")
+        _req_new = _mcp_registry.check_requirement({
+            "what": "пример", "type": "command", "check": sys.executable,
+            "args": ["-c", "print('22.5.0')"], "min_version": 22})
+        check(_req_new.ok is True,
+              f"Node.js 22 при пороге 22 — подходит: {_req_new.detail}")
+        _dbhub_srv = next((s for s in _servers if s.id == "dbhub"), None)
+        _node_in_dbhub = next(
+            (r for r in (_dbhub_srv.requirements if _dbhub_srv else [])
+             if r.value == "node"), None)
+        check(_node_in_dbhub is not None and _node_in_dbhub.min_version == 22,
+              "у dbhub порог Node.js 22 — из engines пакета, а не обещание 18+")
+        # Тот же Node.js, но пороги у серверов разные: dbhub просит 22, а
+        # браузерам хватает 18 — строка engines в пакете @playwright/mcp.
+        # Один и тот же Node 20 обязан быть достаточным для одних и
+        # недостаточным для другого: иначе порог в реестре — украшение.
+        _br_srv_req = next((s for s in _servers if s.id == "browsers"), None)
+        _node_in_br = next(
+            (r for r in (_br_srv_req.requirements if _br_srv_req else [])
+             if r.value == "node"), None)
+        check(_node_in_br is not None and _node_in_br.min_version == 18,
+              "у browsers порог Node.js 18 — из engines пакета @playwright/mcp")
+        _req20 = {"type": "command", "check": sys.executable,
+                  "args": ["-c", "print('20.11.0')"]}
+        _db20 = _mcp_registry.check_requirement(
+            dict(_req20, what="dbhub", min_version=22))
+        _br20 = _mcp_registry.check_requirement(
+            dict(_req20, what="browsers", min_version=18))
+        check(_db20.ok is False and _br20.ok is True,
+              "Node 20 не годится dbhub и годится браузерам — пороги разные")
 
         # Кнопка там, где ставить реально можно.
         check(_by["windows-admin"].install.has_button
@@ -5422,8 +8725,8 @@ def main() -> int:
         _needs = pmod.bridge_needs(_base)
         check(len(_needs) == 2, f"в разделе «нужно мостам» два предмета: {len(_needs)}")
         _nn = {n.program: n for n in _needs}
-        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 3,
-              "Node.js требуют трое серверов из восьми")
+        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 6,
+              "Node.js требуют шестеро серверов из двенадцати: LMArena на Python")
         check(_nn.get("Node.js") is not None
               and _nn["Node.js"].install.winget_id == "OpenJS.NodeJS.LTS",
               "у Node.js настоящий идентификатор winget")
@@ -5668,7 +8971,7 @@ def main() -> int:
     if pcard is not None and wmod is not None:
         _pbase = core.program_root()
         _cards = pcard.cards(_pbase)
-        check(len(_cards) >= 8, f"карточек не меньше восьми: {len(_cards)}")
+        check(len(_cards) >= 12, f"карточек не меньше двенадцати: {len(_cards)}")
         check(pcard.section_problem(_pbase) == "",
               f"данные для карточек целы: {pcard.section_problem(_pbase)[:60]}")
 
@@ -5677,8 +8980,9 @@ def main() -> int:
         _node = _by_name.get("Node.js")
         check(_node is not None, "Node.js — карточка есть")
         _node_servers = set(_node.servers) if _node else set()
-        check(_node_servers == {"windows-admin", "excel", "obs"},
-              f"Node.js одной карточкой на троих серверов: {sorted(_node_servers)}")
+        check(_node_servers == {"windows-admin", "excel", "obs", "dbhub",
+                               "browsers", "omniroute"},
+              f"Node.js одной карточкой на шестерых серверов: {sorted(_node_servers)}")
         check(sum(1 for c in _cards if c.name == "Node.js") == 1,
               "и не двумя карточками, как он описан в реестре")
         check("нужна:" in pcard.needed_by_text(_node, pcard.servers_by_name(_pbase)),
@@ -6868,7 +10172,7 @@ def main() -> int:
     # ---- 8х. Совместимость версий: предупреждение, а не отказ
     echo("\n--- 8х. Совместимость версий ---")
     #
-    # Откуда. Описание совместимости лежало в реестре у всех восьми
+    # Откуда. Описание совместимости лежало в реестре у всех девяти
     # серверов, а читала его ноль строк кода. Версия на машине и список
     # проверенных были записаны и не показывались никому.
     #

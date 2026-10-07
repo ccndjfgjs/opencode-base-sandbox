@@ -379,6 +379,17 @@ def install_plugin(base: Path, dest: Path, progress=None) -> tuple[list[str], li
                 errors.append(f"Не удалось сохранить копию {name}: {exc}")
         say(f"Прежние настройки сохранены ({len(old)} шт.)")
 
+    # Прежний AGENTS.md запоминаем ещё и текстом: файл настроек будет
+    # перезаписан из базы, а правила caveman, поставленные галочкой на
+    # вкладке opencode, лежат именно в нём. Без этого блока человек видел
+    # бы «включено», а ответы приходили бы обычным текстом.
+    agents_before = ""
+    if (dest / "AGENTS.md").is_file():
+        try:
+            agents_before = (dest / "AGENTS.md").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            agents_before = ""
+
     # Файлы настроек. opencode.jsonc не перезаписываем поверх живущего
     # в программе: там могут быть провайдеры и мосты. Его разберём
     # отдельно — переведём на эту базу, ничего не стирая.
@@ -394,6 +405,15 @@ def install_plugin(base: Path, dest: Path, progress=None) -> tuple[list[str], li
             except OSError as exc:
                 errors.append(f"Не удалось скопировать {name}: {exc}")
     say(f"Файлы настроек: {copied} из {len(CONFIG_FILES) - 1}")
+
+    if agents_before:
+        try:
+            import caveman  # noqa: PLC0415 — рядом лежит, круга нет
+
+            if caveman.rescue(dest, agents_before):
+                say("Правила caveman сохранены в AGENTS.md")
+        except (OSError, ValueError):
+            pass
 
     # opencode.jsonc: если в программе его ещё нет, кладём образец из базы.
     # Если уже есть — переписываем только пути, оставляя остальные
