@@ -42,8 +42,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+# Под pythonw (оконный Python, без консоли) sys.stdout равен None:
+# .reconfigure() на нём роняет импорт модуля, а модуль импортирует
+# main.py при старте — программа не открывалась совсем. Найдено живьём.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
 
 #: Откуда взят скрипт и по какому коммиту сверялись его байты.
 SOURCE = "https://github.com/crimeacs/auto-improve"

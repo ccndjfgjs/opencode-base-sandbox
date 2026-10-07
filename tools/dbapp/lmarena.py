@@ -52,8 +52,15 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+# Под pythonw (оконный Python, без консоли) sys.stdout равен None:
+# .reconfigure() на нём роняет импорт модуля, а модуль импортирует
+# main.py при старте — программа не открывалась совсем. Найдено живьём.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
 
 #: Адрес и версия форка, по которому сверялись команды и адреса API.
 SOURCE = "https://github.com/CloudWaddie/LMArenaBridge"
