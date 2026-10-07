@@ -5160,6 +5160,655 @@ def main() -> int:
         _or_o.node_exe = _or_orig_node
         shutil.rmtree(_or_tmp, ignore_errors=True)
 
+    # ---- LMArena: мост к моделям площадки Arena. -------------------------
+    # У форка LMArenaBridge нет MCP — он отдаёт OpenAI-совместимый HTTP API.
+    # Проверяется всё, что можно проверить без арены и без токена человека:
+    # лаунчер (он же MCP-слой), запись реестра, пути и папки, работа с
+    # токеном, живой запрос к API на поддельном мосте, отказы и
+    # идемпотентность. Настоящую арену в самопроверку не зовём: это чужой
+    # трафик и живой аккаунт человека.
+    import http.server as _lm_http  # noqa: PLC0415 — рядом со своей проверкой
+    import os as _lm_os  # noqa: PLC0415
+    import socket as _lm_socket  # noqa: PLC0415
+    import subprocess as _lm_sp  # noqa: PLC0415
+    import threading as _lm_thread  # noqa: PLC0415
+    import lmarena as _lm_o  # noqa: PLC0415 — рядом лежит, круга нет
+
+    _lm_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "lmarena_bridge_launcher.py")
+    check(_lm_launcher.is_file(), "лаунчер моста LMArena на месте")
+    if _lm_launcher.is_file():
+        _lm_src = _lm_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _lm_src,
+              "лаунчер LMArena пишет журнал в stderr, а не в stdout")
+        check("PyQt6" not in _lm_src and "from PyQt" not in _lm_src,
+              "лаунчер LMArena не тянет окно программы")
+        check("import lmarena" in _lm_src and "mcp_main" in _lm_src,
+              "лаунчер LMArena берёт протокол из общего модуля, а не свой")
+        check("def main() -> int" in _lm_src and "__main__" in _lm_src,
+              "лаунчер LMArena запускается сам: main() и __main__")
+        check("return 1" in _lm_src and "Код моста не найден" in _lm_src,
+              "и отказывает внятно, если кода нет, — а не падает молча")
+        check("auth_token" not in _lm_src and "apiKey" not in _lm_src
+              and "base64-" not in _lm_src,
+              "лаунчер LMArena не знает секретов: токен живёт рядом с "
+              "настройками")
+
+    # Код форка лежит в программе: без него мост не собрать.
+    check(_lm_o.REQUIREMENTS.is_file()
+          and (_lm_o.SERVER_DIR / "LICENSE").is_file(),
+          "рядом с кодом форка есть requirements.txt и LICENSE")
+    check((_lm_o.SERVER_DIR / "README.md").is_file()
+          and "что здесь лежит" in
+          (_lm_o.SERVER_DIR / "README.md").read_text(encoding="utf-8"),
+          "README в папке моста — наш, объясняющий, что скопировано")
+
+    # Запись реестра: та же форма, что у остальных мостов, и без секретов.
+    _lm_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "lmarena"), None)
+    check(_lm_srv is not None, "сервер lmarena есть в реестре программы")
+    if _lm_srv is not None:
+        _lm_conn = _lm_srv.raw.get("connection") or {}
+        _lm_cmd = [str(part) for part in _lm_conn.get("command") or []]
+        check(_lm_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _lm_cmd
+              and any("lmarena_bridge_launcher.py" in part for part in _lm_cmd),
+              "команда lmarena — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _lm_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде lmarena нет настоящих путей: {_lm_cmd}")
+        check(_lm_conn.get("warm_up") is False,
+              "у lmarena прогрев не включён: npx тут не при чём")
+        check(_lm_srv.license == "MIT" and _lm_srv.raw.get("tools_count") == 3,
+              f"лицензия MIT и три инструмента: "
+              f"{_lm_srv.license}, {_lm_srv.tools_count}")
+        check(len(_lm_srv.raw.get("setup_steps") or []) == 7,
+              "у lmarena семь шагов настройки — как у остальных мостов")
+        check(all(r.kind in ("command", "program", "manual")
+                  for r in _lm_srv.requirements),
+              "у каждого требования lmarena понятный вид")
+        check(not _lm_srv.blocking_manual,
+              "среди ручных требований нет ни одного блокирующего")
+        _lm_install = _lm_srv.raw.get("program_install") or {}
+        check(_lm_install.get("method") == "none"
+              and _lm_install.get("bridge") == "bundled",
+              "мост ставит сама программа: method none, мост внутри программы")
+        check(_lm_install.get("bridge_checked") is False
+              and not _lm_install.get("known_good"),
+              "зелёной отметки нет: живой ответ модели не проверялся")
+        check(_lm_srv.raw.get("ready_here") is False,
+              "и ready_here честно false — проверено не всё")
+        _lm_json = json.dumps(_lm_srv.raw, ensure_ascii=False)
+        check("стелс" in _lm_json.lower() and "403" in _lm_json,
+              "и человеку сказано, что стелс-модели форк не отдаёт (403)")
+        _lm_record = json.dumps(_lm_srv.raw, ensure_ascii=False)
+        check("auth_token" not in _lm_record.lower()
+              and "mcp-lmarena-token" not in _lm_record.replace(
+                  "mcp-lmarena-token.txt", "")
+              and not re.search(r"base64-[A-Za-z0-9+/=]{16,}", _lm_record),
+              "в записи реестра нет секретов: только имя файла и префикс куки")
+        _lm_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("lmarena" not in (_lm_node.get("required_by") or []),
+              "lmarena не требует Node.js: мост на Python")
+
+    # Пути, папки и адреса: как у остальных мостов, без настоящих путей.
+    check(_lm_o.SERVER_DIR == _root / "tools" / "thirdparty" / "lmarena",
+          f"папка моста своя, внутри программы: {_lm_o.SERVER_DIR}")
+    check(str(_lm_o.ENTRY).replace("\\", "/").endswith("src/main.py"),
+          f"точка входа — код форка из README: {_lm_o.ENTRY.name}")
+    check(_lm_o.LAUNCHER.is_file(), "модуль знает свой лаунчер")
+    _lm_env_port = _lm_os.environ.pop("LMARENA_PORT", None)
+    _lm_env_host = _lm_os.environ.pop("LMARENA_HOST", None)
+    check(_lm_o.base_url() == "http://127.0.0.1:8000"
+          and _lm_o.api_url() == "http://127.0.0.1:8000/api/v1",
+          f"адрес API — из README форка: {_lm_o.api_url()}")
+    check(_lm_o.MODELS_PATH.startswith("/api/")
+          and _lm_o.CHAT_PATH.startswith("/api/"),
+          f"пути API — те же, что в коде форка: {_lm_o.MODELS_PATH}")
+    check(len(_lm_o.WARNINGS) >= 5
+          and any("условиям сервиса" in w for w in _lm_o.WARNINGS)
+          and any("приватный код" in w.lower() for w in _lm_o.WARNINGS)
+          and any("стелс" in w.lower() for w in _lm_o.WARNINGS)
+          and any("лимит" in w.lower() for w in _lm_o.WARNINGS)
+          and any("токен" in w.lower() for w in _lm_o.WARNINGS),
+          f"обязательные предупреждения на месте: {len(_lm_o.WARNINGS)}")
+    check(any("все сетевые интерфейсы" in w for w in _lm_o.WARNINGS)
+          and any("admin" in w for w in _lm_o.WARNINGS),
+          "и сказано про открытый интерфейс моста и пароль панели")
+    _lm_mod = Path(_lm_o.__file__).read_text(encoding="utf-8")
+    check('host="0.0.0.0"' in _lm_mod and "не подменяет" in _lm_mod,
+          "в модуле записано, почему хост и пароль панели мы не подменяем")
+    check("404" in _lm_o.FORK_CHOICE and "CloudWaddie" in _lm_o.FORK_CHOICE,
+          "выбор форка обоснован: два других не существуют")
+
+    _lm_tmp = Path(tempfile.mkdtemp(prefix="lmarena-selftest-"))
+    _lm_save = (_lm_o.ENTRY, _lm_o.SERVER_DIR, _lm_o.venv_python, _lm_o.deployed)
+    try:
+        _lm_dest = _lm_tmp / "настройки"
+        _lm_dest.mkdir()
+        check(_lm_o.data_dir(_lm_dest) == _lm_dest / "lmarena-data",
+              "папка базы моста — рядом с настройками opencode")
+        check(_lm_o.token_path(_lm_dest) == _lm_dest / "mcp-lmarena-token.txt",
+              "файл токена — рядом с настройками, не в репозитории")
+        check(_lm_o.venv_python().name in ("python", "python.exe")
+              and _lm_o.VENV_DIR.parent == _lm_o.SERVER_DIR,
+              f"окружение моста своё, внутри папки моста: "
+              f"{_lm_o.VENV_DIR.name}")
+
+        # Кода нет — «развёрнут» не должно быть правдой, и запуск отказывает.
+        _lm_o.SERVER_DIR = _lm_tmp / "папка-моста-нет"
+        _lm_o.ENTRY = _lm_o.SERVER_DIR / "src" / "main.py"
+        check(_lm_o.deployed() is False,
+              "без кода форка мост не считается развёрнутым")
+        _lm_missing = _lm_o.missing_files()
+        check(any("src/main.py" in item for item in _lm_missing),
+              f"и видно, чего не хватает: {_lm_missing}")
+        check("не найден" in _lm_o.status_text(_lm_dest),
+              f"статус говорит об этом словами: "
+              f"{_lm_o.status_text(_lm_dest)[:70]}")
+        _lm_msgs0, _lm_errs0 = _lm_o.start(_lm_dest)
+        check(bool(_lm_errs0) and "не найден" in _lm_errs0[0],
+              f"без кода запуск отказывает: {_lm_errs0[:1]}")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "и в настройки opencode ничего не вписано")
+        check(_lm_o.read_token(_lm_dest) == ""
+              and not _lm_o.token_present(_lm_dest),
+              "токена нет — и это не ошибка чтения, а пустая строка")
+
+        # Код есть, окружения нет — честная подсказка про «Развернуть».
+        _lm_o.SERVER_DIR = _lm_save[1]
+        _lm_o.ENTRY = _lm_save[0]
+        _lm_o.venv_python = lambda: _lm_tmp / "нет-такого-python"
+        check(_lm_o.deployed() is False
+              and "окружение не поставлено" in _lm_o.status_text(_lm_dest),
+              "без окружения статус просит «Развернуть», а не молчит")
+
+        # Токен: файл рядом с настройками, в настройки opencode не попадает.
+        _lm_secret = "base64-ТЕСТОВЫЙ-ТОКЕН-1234567890"
+        _lm_msgs1, _lm_errs1 = _lm_o.save_token(_lm_dest, "   ")
+        check(bool(_lm_errs1) and not _lm_o.token_present(_lm_dest),
+              "пустой токен не сохраняется")
+        _lm_msgs2, _lm_errs2 = _lm_o.save_token(_lm_dest, _lm_secret)
+        check(not _lm_errs2 and _lm_o.read_token(_lm_dest) == _lm_secret,
+              "токен сохранён файлом рядом с настройками")
+        check(all(_lm_secret not in m for m in _lm_msgs2),
+              "и в сообщении окна его нет — только «сохранён»")
+        check(_lm_o.token_present(_lm_dest) is True, "и он виден как «есть»")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "в настройки opencode токен не пишется")
+
+        _lm_msgs3, _lm_errs3 = _lm_o.apply_token(_lm_dest)
+        _lm_cfg = _lm_o.data_dir(_lm_dest) / "config.json"
+        _lm_cfg_data = json.loads(_lm_cfg.read_text(encoding="utf-8"))
+        check(not _lm_errs3 and _lm_cfg_data.get("auth_tokens") == [_lm_secret]
+              and _lm_cfg_data.get("auth_token") == _lm_secret,
+              "и уезжает в config.json моста (только туда)")
+        check(all(_lm_secret not in m for m in _lm_msgs3),
+              "в сообщениях о переносе токена его тоже нет")
+        _lm_cfg_backup = _lm_cfg.read_text(encoding="utf-8")
+        check(_lm_secret not in _lm_o.status_text(_lm_dest),
+              "статус про токен говорит, а самого токена не показывает")
+        _lm_cfg.write_text("{ это не json", encoding="utf-8")
+        _lm_msgs4, _lm_errs4 = _lm_o.apply_token(_lm_dest)
+        check(bool(_lm_errs4) and "не читается" in _lm_errs4[0],
+              f"сломанный config.json не переписывается: {_lm_errs4[:1]}")
+        check(_lm_cfg.read_text(encoding="utf-8") == "{ это не json",
+              "и файл остался как был")
+        _lm_cfg.write_text(_lm_cfg_backup, encoding="utf-8")
+
+        # Поддельный мост: отвечает как настоящий, без арены.
+        class _LmBridge(_lm_http.BaseHTTPRequestHandler):
+            mode = "healthy"
+            models = [{"id": "model-a", "owned_by": "org-a"},
+                      {"id": "model-b", "owned_by": "org-b"}]
+            answer = "работает"
+
+            def log_message(self, *args):  # тишина: журнал тут не нужен
+                pass
+
+            def _raw(self, code, text):
+                body = text.encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _send(self, code, payload):
+                self._raw(code, json.dumps(payload, ensure_ascii=False))
+
+            def do_GET(self):  # noqa: N802 — так требует http.server
+                if self.path.endswith("/api/v1/health"):
+                    if self.mode == "junk":
+                        self._raw(200, "привет, я не JSON")
+                        return
+                    self._send(200, {"status": self.mode,
+                                     "checks": {"model_count": len(self.models)}})
+                    return
+                if self.path.endswith("/api/v1/models"):
+                    self._send(200, {"object": "list", "data": self.models})
+                    return
+                self._send(404, {"detail": "нет такого пути"})
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                if self.path.endswith("/api/v1/chat/completions"):
+                    if self.mode == "closed":
+                        self._send(401, {"detail": "Invalid API Key."})
+                        return
+                    if self.mode == "empty":
+                        self._send(200, {"choices": [
+                            {"message": {"content": ""}}]})
+                        return
+                    self._send(200, {"choices": [
+                        {"message": {"role": "assistant",
+                                     "content": self.answer}}]})
+                    return
+                self._send(404, {"detail": "нет такого пути"})
+
+        def _lm_api(mode="healthy"):
+            """Поднимает подделку моста на свободном порту."""
+            _LmBridge.mode = mode
+            server = _lm_http.HTTPServer(("127.0.0.1", 0), _LmBridge)
+            _lm_thread.Thread(target=server.serve_forever, daemon=True).start()
+            return server, server.server_address[1]
+
+        # «Развёрнут» — только на время проверок API: файл-заглушка на месте
+        # кода форка и Python из самого процесса. Дальше он снова
+        # выключается, чтобы отказы проверялись честно.
+        _lm_fake_entry = _lm_tmp / "main.py"
+        _lm_fake_entry.write_text("// заглушка самопроверки\n", encoding="utf-8")
+
+        # Порт поддельного моста подставляем переменной — своей, не чужой.
+        _lm_good, _lm_port = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port)
+        check(_lm_o.base_url() == f"http://127.0.0.1:{_lm_port}",
+              "порт для проверки подставляется своей переменной")
+
+        _lm_ok, _lm_data, _lm_note = _lm_o.health(_lm_dest, timeout=3)
+        check(_lm_ok and _lm_data.get("status") == "healthy",
+              f"живой запрос к API моста проходит: {_lm_note[:60]}")
+        check("окружение не поставлено" in _lm_o.status_text(_lm_dest),
+              "отвечающий мост не заставляет статус врать без окружения")
+        _lm_o.ENTRY = _lm_fake_entry
+        _lm_o.SERVER_DIR = _lm_tmp
+        _lm_o.venv_python = lambda: Path(sys.executable)
+        check(_lm_o.deployed() is True,
+              "с кодом и окружением мост считается развёрнутым")
+        _lm_names, _lm_note2 = _lm_o.chat_models(_lm_dest)
+        check(_lm_names == ["model-a", "model-b"],
+              f"список моделей читается у моста: {_lm_names}")
+        _lm_answer, _lm_note3 = _lm_o.chat(_lm_dest, "model-a", "привет")
+        check(_lm_answer == "работает" and not _lm_note3,
+              f"ответ модели разбирается: {_lm_answer!r}")
+        _lm_status_live = _lm_o.status_text(_lm_dest)
+        check("отвечает" in _lm_status_live and "токен есть" in _lm_status_live
+              and "моделей: 2" in _lm_status_live
+              and _lm_secret not in _lm_status_live,
+              f"статус называет и токен, и число моделей, и не показывает "
+              f"токен: {_lm_status_live[:80]}")
+        _lm_note4 = _lm_o.chat(_lm_dest, "", "")[1]
+        check("Нужны и модель" in _lm_note4,
+              f"пустой запрос к модели — отказ: {_lm_note4[:50]}")
+
+        # Живая проверка моста: сервер, список моделей и ответ модели.
+        _lm_chk, _lm_chk_err = _lm_o.check_connection(_lm_dest)
+        check(not _lm_chk_err, f"живая проверка проходит: {_lm_chk_err[:1]}")
+        check(any("ответила через мост" in m for m in _lm_chk),
+              f"и это ответ модели, а не взгляд на файлы: {_lm_chk[-1:]}")
+
+        # Провайдер в opencode: блок собирается из живых моделей.
+        _lm_block = _lm_o.provider_block(_lm_names)
+        check('"model-a"' in _lm_block and '"model-b"' in _lm_block
+              and _lm_o.api_url() in _lm_block,
+              "блок провайдера называет модели моста и его адрес")
+        check("apiKey" not in _lm_block and "sk-" not in _lm_block,
+              "ключа в блоке нет: мост берёт свой первый ключ из config.json")
+
+        _lm_cfg_dest = _lm_tmp / "настройки-включения"
+        _lm_cfg_dest.mkdir()
+        (_lm_cfg_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_p1, _lm_pe1 = _lm_o.install_provider(_lm_cfg_dest, _lm_names)
+        _lm_pcfg1 = (_lm_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        _lm_p2, _lm_pe2 = _lm_o.install_provider(_lm_cfg_dest, _lm_names)
+        _lm_pcfg = (_lm_cfg_dest / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _lm_pe1 and not _lm_pe2,
+              f"провайдер lmarena ставится без ошибок: "
+              f"{_lm_pe1 or _lm_pe2 or 'чисто'}")
+        check(_lm_pcfg == _lm_pcfg1,
+              "повтор провайдера не меняет файл настроек")
+        check(opencode_caps.check_jsonc(_lm_pcfg)
+              and opencode_caps.providers_status(_lm_cfg_dest).get(
+                  "lmarena") is True,
+              "настройки остались валидными, и статус видит пресет")
+        check("apiKey" not in _lm_pcfg and "base64-" not in _lm_pcfg,
+              "в настройках opencode нет ни ключа, ни токена арены")
+
+        # Динамический пресет без живого блока не ставится: выдумывать
+        # список моделей нельзя.
+        _lm_p3, _lm_pe3 = opencode_caps.install_providers(_lm_cfg_dest,
+                                                          {"lmarena"})
+        check(bool(_lm_pe3) and "живого моста" in _lm_pe3[0],
+              f"без живого моста провайдер lmarena не ставится: "
+              f"{_lm_pe3[:1]}")
+        check("lmarena" in opencode_caps.PROVIDER_DYNAMIC
+              and not opencode_caps.PROVIDER_PRESETS["lmarena"][2],
+              "и в пресетах он помечен как динамический")
+
+        # Мост молчит — живая проверка отказывает, а не «работает».
+        _lm_free = _lm_socket.socket()
+        _lm_free.bind(("127.0.0.1", 0))
+        _lm_free_port = _lm_free.getsockname()[1]
+        _lm_free.close()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+        _lm_ok5, _lm_data5, _lm_note5 = _lm_o.health(_lm_dest, timeout=2)
+        check(not _lm_ok5 and "не ответил" in _lm_note5,
+              f"молчащий порт — отказ: {_lm_note5[:70]}")
+        _lm_chk5, _lm_chk5_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk5_err),
+              f"и живая проверка не выдаёт это за успех: {_lm_chk5_err[:1]}")
+
+        # Мусор вместо JSON — тоже отказ: чужой процесс за портом.
+        _lm_junk, _lm_port_junk = _lm_api("junk")
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port_junk)
+        _lm_ok6, _lm_data6, _lm_note6 = _lm_o.health(_lm_dest, timeout=3)
+        check(not _lm_ok6 and "не разобрался" in _lm_note6,
+              f"мусор вместо JSON — тоже отказ: {_lm_note6[:70]}")
+        _lm_junk.shutdown()
+
+        # Ответ есть, а моделей нет — живая проверка отказывает и говорит
+        # про токен, а не ставит зелёную отметку.
+        _lm_empty, _lm_port_empty = _lm_api()
+        _LmBridge.models = []
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port_empty)
+        _lm_chk6, _lm_chk6_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk6_err) and "токен" in _lm_chk6_err[0],
+              f"без моделей живая проверка говорит про токен: "
+              f"{_lm_chk6_err[:1]}")
+        check("моделей нет" in _lm_o.status_text(_lm_dest),
+              f"статус видит мост без моделей: "
+              f"{_lm_o.status_text(_lm_dest)[-60:]}")
+        _LmBridge.models = [{"id": "model-a", "owned_by": "org-a"},
+                            {"id": "model-b", "owned_by": "org-b"}]
+
+        # Модель отвечает пустым текстом — это отказ, а не ответ.
+        _LmBridge.mode = "empty"
+        _lm_answer2, _lm_note7 = _lm_o.chat(_lm_dest, "model-a", "привет")
+        check(not _lm_answer2 and "пустым" in _lm_note7,
+              f"пустой ответ модели — отказ: {_lm_note7[:60]}")
+        _LmBridge.mode = "closed"
+        _lm_chk7, _lm_chk7_err = _lm_o.check_connection(_lm_dest)
+        check(bool(_lm_chk7_err) and "401" in _lm_chk7_err[0],
+              f"отказ API доходит до человека словами: {_lm_chk7_err[:1]}")
+        _LmBridge.mode = "healthy"
+        _lm_empty.shutdown()
+        _lm_good.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Автонастройка, когда кода нет и мост не отвечает: отказ словами и
+        # ни строчки в настройках opencode.
+        _lm_o.ENTRY = _lm_tmp / "нет-такого-main.py"
+        _lm_msgs8, _lm_errs8 = _lm_o.auto_setup(_lm_dest, _lm_srv)
+        check(bool(_lm_errs8)
+              and any("ничего не вписано" in e for e in _lm_errs8),
+              f"автонастройка без моста отказывает: {_lm_errs8[-1:]}")
+        check(not (_lm_dest / "opencode.jsonc").exists(),
+              "и снова ничего не пишет в настройки")
+        _lm_msgs9, _lm_errs9 = _lm_o.start(_lm_dest)
+        check(bool(_lm_errs9) and "не найден" in _lm_errs9[0],
+              f"запуск без кода отказывает: {_lm_errs9[:1]}")
+
+        # Автонастройка на отвечающем мосте: сначала живая проверка, потом
+        # запись. В настройки уходят и мост, и провайдер с живыми моделями.
+        _lm_good2, _lm_port2 = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_port2)
+        _lm_o.ENTRY = _lm_fake_entry
+        _lm_auto_dest = _lm_tmp / "настройки-авто"
+        _lm_auto_dest.mkdir()
+        (_lm_auto_dest / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_o.token_path(_lm_auto_dest).write_text(_lm_secret, encoding="utf-8")
+        _lm_auto_msgs, _lm_auto_errs = _lm_o.auto_setup(_lm_auto_dest, _lm_srv)
+        _lm_auto_text = (_lm_auto_dest / "opencode.jsonc").read_text(
+            encoding="utf-8")
+        check(not _lm_auto_errs,
+              f"автонастройка проходит на отвечающем мосте: "
+              f"{_lm_auto_errs[:1]}")
+        check("lmarena_bridge_launcher.py" in _lm_auto_text
+              and '"lmarena"' in _lm_auto_text,
+              "и вписывает мост в настройки opencode")
+        check('"model-a"' in _lm_auto_text and "baseURL" in _lm_auto_text,
+              "и провайдера с моделями, которые назвал мост")
+        check(_lm_secret not in _lm_auto_text
+              and "base64-" not in _lm_auto_text,
+              "токена арены в настройках opencode нет")
+        _lm_good2.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Кнопки окна: согласие спрашивается, и текст берётся из модуля.
+        _lm_main = (_root / "tools" / "dbapp" / "main.py").read_text(
+            encoding="utf-8")
+        check("LmarenaWarningDialog" in _lm_main
+              and "lmarena.WARNINGS" in _lm_main,
+              "окно показывает предупреждения из общего модуля")
+        check("_lm_confirm" in _lm_main
+              and _lm_main.count("not self._lm_confirm()") >= 3,
+              "согласие спрашивается перед запуском, перезапуском и настройкой")
+        check("LmarenaTokenDialog" in _lm_main
+              and "EchoMode.Password" in _lm_main
+              and "lmarena.save_token" in _lm_main,
+              "токен вводится скрытно и сохраняется модулем моста")
+        check("lmarena" in window.caps_tab.AUTO_SERVERS,
+              "lmarena включён в список автонастройки")
+        check("семь вещей" in _lm_main,
+              "и в подсказке сказано, что автонастройка умеет семь вещей")
+
+        # Идемпотентность включения моста в opencode — тем же механизмом.
+        _lm_clone = copy.copy(_lm_srv)
+        _lm_clone.raw = dict(_lm_srv.raw)
+        _lm_clone.raw["connection"] = dict(_lm_srv.raw.get("connection") or {},
+                                           warm_up=False)
+        _lm_clone.requirements = []
+        _lm_clone.has_connection = True
+        _lm_cfg2 = _lm_tmp / "настройки-mcp"
+        _lm_cfg2.mkdir()
+        (_lm_cfg2 / "opencode.jsonc").write_text(
+            '{\n  "mcp": {}\n}\n', encoding="utf-8")
+        _lm_e1, _lm_ee1 = _mcp_registry.enable(_lm_cfg2, _lm_clone)
+        _lm_c1 = (_lm_cfg2 / "opencode.jsonc").read_text(encoding="utf-8")
+        _lm_e2, _lm_ee2 = _mcp_registry.enable(_lm_cfg2, _lm_clone)
+        _lm_c2 = (_lm_cfg2 / "opencode.jsonc").read_text(encoding="utf-8")
+        check(not _lm_ee1 and '"lmarena"' in _lm_c1
+              and "lmarena_bridge_launcher.py" in _lm_c1,
+              f"включение lmarena пишет блок в настройки: {_lm_ee1}")
+        check("{PROGRAM}" not in _lm_c1,
+              "и настоящий путь лаунчера подставлен, а не плейсхолдер")
+        check(_lm_c1 == _lm_c2 and _lm_c2.count('"lmarena"') == 1,
+              "повторное включение lmarena не меняет файл настройки")
+        check(any("не трогаю" in m for m in _lm_e2),
+              "и программа говорит, что файл не тронула")
+
+        # MCP-слой: протокол отвечает теми же тремя инструментами, что
+        # обещает запись реестра. Проверяем на поддельном мосте.
+        _lm_mcp, _lm_mcp_port = _lm_api()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_mcp_port)
+        _lm_say: list[str] = []
+        _lm_init = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18"}},
+            _lm_dest, _lm_say.append)
+        check(_lm_init["result"]["protocolVersion"] == "2025-06-18"
+              and _lm_init["result"]["serverInfo"]["name"] == "lmarena",
+              f"MCP: рукопожатие отвечает: {_lm_init['result']['serverInfo']}")
+        _lm_list = _lm_o.mcp_handle({"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/list"},
+                                    _lm_dest, _lm_say.append)
+        _lm_tools = [t["name"] for t in _lm_list["result"]["tools"]]
+        check(_lm_tools == ["lmarena_status", "lmarena_models", "lmarena_chat"],
+              f"MCP: три инструмента, как в реестре: {_lm_tools}")
+        check(_lm_o.mcp_handle({"jsonrpc": "2.0",
+                                "method": "notifications/initialized"},
+                               _lm_dest, _lm_say.append) is None,
+              "MCP: уведомление не требует ответа")
+        _lm_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "lmarena_chat",
+                        "arguments": {"model": "model-a",
+                                      "prompt": "привет"}}},
+            _lm_dest, _lm_say.append)
+        check(not _lm_call["result"]["isError"]
+              and _lm_call["result"]["content"][0]["text"] == "работает",
+              "MCP: ответ модели доходит через инструмент")
+        _lm_status_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": "lmarena_status", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        check(not _lm_status_call["result"]["isError"]
+              and "моделей: 2" in
+              _lm_status_call["result"]["content"][0]["text"],
+              "MCP: инструмент состояния отвечает без секретов")
+        _lm_unknown = _lm_o.mcp_handle({"jsonrpc": "2.0", "id": 5,
+                                        "method": "resources/list"},
+                                       _lm_dest, _lm_say.append)
+        check(_lm_unknown["error"]["code"] == -32601,
+              "MCP: неизвестный метод не делается молча")
+        _lm_bad_tool = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "нет-такого", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        check(_lm_bad_tool["result"]["isError"] is True,
+              "MCP: неизвестный инструмент — отказ, а не молчание")
+        _lm_o.deployed = lambda: False
+        _lm_down_call = _lm_o.mcp_handle(
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "lmarena_status", "arguments": {}}},
+            _lm_dest, _lm_say.append)
+        _lm_o.deployed = _lm_save[3]
+        check("не развёрнут" in _lm_down_call["result"]["content"][0]["text"],
+              "MCP: без моста инструмент говорит, что делать, а не молчит")
+        _lm_mcp.shutdown()
+        _lm_os.environ["LMARENA_PORT"] = str(_lm_free_port)
+
+        # Лаунчер живьём: поднимается как отдельный процесс и отвечает по
+        # протоколу. Секретов в его stdout быть не может — stdout это
+        # протокол, журнал идёт в stderr.
+        _lm_env = dict(_lm_os.environ)
+        _lm_env["OPENCODE_CONFIG_DIR"] = str(_lm_dest)
+        _lm_live, _lm_live_port = _lm_api()
+        _lm_env["LMARENA_PORT"] = str(_lm_live_port)
+        _lm_proc = _lm_sp.Popen(
+            [sys.executable, str(_lm_launcher)],
+            stdin=_lm_sp.PIPE, stdout=_lm_sp.PIPE, stderr=_lm_sp.PIPE,
+            text=True, encoding="utf-8", env=_lm_env, cwd=str(_root))
+        try:
+            _lm_proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "selftest",
+                                           "version": "1.0"}}}) + "\n")
+            _lm_proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n")
+            _lm_proc.stdin.flush()
+            _lm_line1 = _lm_proc.stdout.readline()
+            _lm_line2 = _lm_proc.stdout.readline()
+            _lm_proc.stdin.close()
+            _lm_proc.wait(timeout=30)
+        finally:
+            if _lm_proc.poll() is None:
+                _lm_proc.kill()
+            _lm_err_text = _lm_proc.stderr.read()
+            _lm_live.shutdown()
+        _lm_json1 = json.loads(_lm_line1)
+        _lm_json2 = json.loads(_lm_line2)
+        check(_lm_json1.get("result", {}).get("serverInfo", {}).get("name")
+              == "lmarena"
+              and [t["name"] for t in _lm_json2["result"]["tools"]]
+              == ["lmarena_status", "lmarena_models", "lmarena_chat"],
+              "лаунчер живьём отвечает по протоколу MCP")
+        check("[lmarena-bridge]" in _lm_err_text
+              and "запускаю мост" in _lm_err_text,
+              f"и весь журнал идёт в stderr: "
+              f"{_lm_err_text.splitlines()[:1]}")
+        check(_lm_secret not in _lm_err_text,
+              "в журнале лаунчера нет токена арены")
+        check("base64-" not in _lm_line1 + _lm_line2,
+              "и в самом протоколе секретов нет")
+
+        # Командная строка моста: то же, что кнопки окна, и без секретов.
+        _lm_cli = _lm_o.__file__
+        _lm_cli_env = dict(_lm_os.environ)
+        _lm_cli_env["OPENCODE_CONFIG_DIR"] = str(_lm_dest)
+        _lm_help = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "--help"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_help.returncode == 0
+              and all(word in _lm_help.stdout
+                      for word in ("status", "restart", "models", "token")),
+              f"у моста есть командная строка для скилла: "
+              f"{_lm_help.stdout.strip()[:60]}")
+        _lm_unknown_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "абракадабра"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_unknown_cli.returncode == 2
+              and "Не знаю такой команды" in _lm_unknown_cli.stdout,
+              f"неизвестная команда не делается молча: "
+              f"{_lm_unknown_cli.stdout.strip()[:60]}")
+        _lm_token_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "token"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_token_cli.returncode == 0
+              and "Есть токен: да" in _lm_token_cli.stdout
+              and _lm_secret not in _lm_token_cli.stdout,
+              "команда token говорит «да/нет», не показывая значение")
+
+        # Команда status отвечает кодом 0, только когда мост живой, и кодом
+        # 1, когда молчит. Код возврата и есть ответ «мост отвечает или нет».
+        _lm_cli_live, _lm_cli_port = _lm_api()
+        _lm_cli_env["LMARENA_PORT"] = str(_lm_cli_port)
+        _lm_status_cli = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "status"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_status_cli.returncode == 0
+              and "Мост" in _lm_status_cli.stdout,
+              f"status на живом мосте — код 0: "
+              f"{_lm_status_cli.stdout.strip()[:70]}")
+        _lm_cli_live.shutdown()
+        _lm_cli_env["LMARENA_PORT"] = str(_lm_free_port)
+        _lm_status_cli2 = _lm_sp.run(
+            [sys.executable, str(_lm_cli), "status"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=_lm_cli_env, timeout=90)
+        check(_lm_status_cli2.returncode == 1,
+              f"status на молчащем мосте — код 1: "
+              f"{_lm_status_cli2.stdout.strip()[:70]}")
+
+        # Служебная команда «stop» чужой процесс на порту не трогает.
+        _lm_msgs10, _lm_errs10 = _lm_o.stop(_lm_dest)
+        check(not _lm_errs10,
+              f"stop ничего не трогает, когда мост не наш: "
+              f"{(not _lm_errs10 and 'чисто') or _lm_errs10[0][:50]}")
+    finally:
+        (_lm_o.ENTRY, _lm_o.SERVER_DIR, _lm_o.venv_python,
+         _lm_o.deployed) = _lm_save
+        if _lm_env_port is None:
+            _lm_os.environ.pop("LMARENA_PORT", None)
+        else:
+            _lm_os.environ["LMARENA_PORT"] = _lm_env_port
+        if _lm_env_host is None:
+            _lm_os.environ.pop("LMARENA_HOST", None)
+        else:
+            _lm_os.environ["LMARENA_HOST"] = _lm_env_host
+        shutil.rmtree(_lm_tmp, ignore_errors=True)
+
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
     check(isinstance(_on, bool) and _port > 0,
@@ -6260,9 +6909,9 @@ def main() -> int:
     # --- настоящий реестр
     _base = core.program_root()
     _servers = mcp_registry.load_servers(_base)
-    check(len(_servers) == 11, f"реестр читается, 11 серверов: {len(_servers)}")
+    check(len(_servers) == 12, f"реестр читается, 12 серверов: {len(_servers)}")
     check(all(s.program_install is not None for s in _servers),
-          "у всех 11 серверов есть блок program_install")
+          "у всех 12 серверов есть блок program_install")
     _by_id = {s.id: s.program_install for s in _servers}
     if all(_by_id.values()):
         check(_by_id["blender"].winget_id == "BlenderFoundation.Blender"
@@ -6345,13 +6994,13 @@ def main() -> int:
         check(any("серверов 0" in b for b in _bad2),
               f"и называет причину — ноль серверов: {(_bad2 or [''])[0][:70]}")
 
-        # Все одиннадцать на месте, и у каждого четыре ответа.
+        # Все двенадцать на месте, и у каждого четыре ответа.
         _views = pmod.server_views(_base)
-        check(len(_views) == 11, f"движок прочитал все одиннадцать серверов: {len(_views)}")
+        check(len(_views) == 12, f"движок прочитал все двенадцать серверов: {len(_views)}")
         _by = {v.id: v for v in _views}
         for _sid in ("windows-admin", "excel", "blender", "adobe-creativity",
                      "android-studio", "obs", "android-emulator", "ldplayer",
-                     "dbhub", "browsers", "omniroute"):
+                     "dbhub", "browsers", "omniroute", "lmarena"):
             check(_sid in _by, f"сервер {_sid} есть в движке")
 
         # Порог версии сравнивается, а не просто запоминается. Пример DBHub
@@ -6441,7 +7090,7 @@ def main() -> int:
         check(len(_needs) == 2, f"в разделе «нужно мостам» два предмета: {len(_needs)}")
         _nn = {n.program: n for n in _needs}
         check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 6,
-              "Node.js требуют шестеро серверов из одиннадцати")
+              "Node.js требуют шестеро серверов из двенадцати: LMArena на Python")
         check(_nn.get("Node.js") is not None
               and _nn["Node.js"].install.winget_id == "OpenJS.NodeJS.LTS",
               "у Node.js настоящий идентификатор winget")
@@ -6686,7 +7335,7 @@ def main() -> int:
     if pcard is not None and wmod is not None:
         _pbase = core.program_root()
         _cards = pcard.cards(_pbase)
-        check(len(_cards) >= 11, f"карточек не меньше одиннадцати: {len(_cards)}")
+        check(len(_cards) >= 12, f"карточек не меньше двенадцати: {len(_cards)}")
         check(pcard.section_problem(_pbase) == "",
               f"данные для карточек целы: {pcard.section_problem(_pbase)[:60]}")
 

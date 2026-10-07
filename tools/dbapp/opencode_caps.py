@@ -716,16 +716,39 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
         "      }\n"
         "    },",
     ),
+    # Мост LMArena. Статического блока у него нет намеренно: имена моделей
+    # называет сама арена, и на каждой машине список свой. Блок собирает
+    # lmarena.provider_block() из живого ответа моста и передаётся в
+    # install_providers(blocks=...). Пустой третий элемент здесь — не
+    # забытая строка, а признак: см. PROVIDER_DYNAMIC.
+    "lmarena": (
+        "LMArena (мост к моделям арены; модели берутся живьём из моста)",
+        "",
+        "",
+    ),
 }
+
+#: Пресеты, чей блок собирается из живого ответа моста, а не лежит в коде.
+#: Выдумать список моделей нельзя: у арены он свой и меняется. Такой
+#: пресет ставится только с готовым блоком (install_providers(blocks=...)),
+#: иначе установка отказывает — пустой провайдер в настройках хуже, чем
+#: его отсутствие.
+PROVIDER_DYNAMIC: set[str] = {"lmarena"}
 
 
 def install_providers(
     dest: Path,
     selection: set[str],
     progress=None,
+    blocks: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Дописывает выбранные пресеты в provider. Ключи не трогает и не просит:
-    их человек вводит сам (/connect или переменные окружения)."""
+    их человек вводит сам (/connect или переменные окружения).
+
+    `blocks` — готовые блоки для пресетов из PROVIDER_DYNAMIC: их собирает
+    тот, кто знает живой ответ моста (у LMArena это список моделей арены).
+    Для остальных пресетов блок берётся из PROVIDER_PRESETS, как раньше.
+    """
     messages: list[str] = []
     errors: list[str] = []
 
@@ -739,6 +762,18 @@ def install_providers(
         errors.append(f"Не знаю таких провайдеров: {', '.join(sorted(unknown))}.")
         return messages, errors
     if not selection:
+        return messages, errors
+
+    override = dict(blocks or {})
+    need_block = [name for name in sorted(selection)
+                  if name in PROVIDER_DYNAMIC and not override.get(name)]
+    if need_block:
+        errors.append(
+            "Блок провайдера «" + "», «".join(need_block) + "» собирается из "
+            "живого моста: без его ответа список моделей выдумывать нельзя. "
+            "Запусти мост и повтори — или возьми кнопку «Настроить "
+            "автоматически» у строки моста."
+        )
         return messages, errors
 
     dest.mkdir(parents=True, exist_ok=True)
@@ -759,7 +794,8 @@ def install_providers(
             raise ValueError("opencode.jsonc сломан — правим руками, не автоматом")
         text = ensure_object(text, "provider")
         for name in sorted(selection):
-            _title, _key, block = PROVIDER_PRESETS[name]
+            _title, _key, preset_block = PROVIDER_PRESETS[name]
+            block = override.get(name) or preset_block
             bounds = find_key_object(text, "provider")
             assert bounds is not None
             if not has_entry(text[bounds[0] : bounds[1]], name):

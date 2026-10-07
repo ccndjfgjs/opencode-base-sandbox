@@ -118,3 +118,21 @@ mcp-browsers.json
 #     web-cookie. Правило закрывает папку и на случай, когда настройки
 #     opencode лежат внутри базы, — по образцу mcp-dbhub.toml выше.
 omniroute-data/
+
+# Секреты моста LMArena. Публиковать нельзя: это данные этой машины.
+#   mcp-lmarena-token.txt — токен арены (кука arena-auth-prod-v1) рядом с
+#     настройками opencode. Это доступ к аккаунту человека на площадке
+#     arena.ai, поэтому правило закрывает файл по образцу
+#     mcp-*-password.txt выше и на случай, когда настройки opencode лежат
+#     внутри базы.
+#   lmarena-data/ — папка моста рядом с настройками: в config.json лежит
+#     тот же токен, в models.json — список моделей этой машины, в
+#     bridge.log — журнал запросов.
+mcp-lmarena-token.txt
+lmarena-data/
+
+# Окружение моста LMArena: ставится кнопкой «Развернуть» в свою папку
+# (десятки мегабайт: fastapi, uvicorn, camoufox, playwright, cloudscraper).
+# По образцу node_modules/ выше: служебная папка пакетов, на другой машине
+# ставится заново.
+tools/thirdparty/lmarena/.venv/

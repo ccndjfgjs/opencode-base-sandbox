@@ -22,6 +22,7 @@ if __package__ in (None, ""):
     import bridges  # type: ignore[import-not-found]
     import browsers  # type: ignore[import-not-found]
     import dbhub  # type: ignore[import-not-found]
+    import lmarena  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
@@ -2579,6 +2580,129 @@ class BrowserChoiceDialog(QDialog):
         self.accept()
 
 
+class LmarenaWarningDialog(QDialog):
+    """Предупреждения моста LMArena — до первого запуска.
+
+    Мост работает через веб-сервис арены, а не через её официальный API,
+    и запросы уходят на публичную площадку. Поэтому мост выключен по
+    умолчанию, а это окно показывается каждый раз перед тем, как его
+    поднять или вписать в настройки: согласие должно быть осознанным, а
+    не «я когда-то нажал галочку». Текст предупреждений держится в
+    lmarena.WARNINGS — там же, откуда его берут скилл и самопроверка.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Мост LMArena: что важно знать")
+        self.setMinimumWidth(680)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Мост LMArena — программа к сервису Arena (arena.ai). Он "
+            "включается только по явному согласию и по умолчанию выключен. "
+            "Перед первым запуском прочитай, на что идёшь:",
+            wrap=True,
+        ))
+        for number, warning in enumerate(lmarena.WARNINGS, start=1):
+            box.addWidget(ui.label(f"{number}. {warning}", wrap=True))
+
+        box.addWidget(ui.label(
+            "Нажми «Согласен» — и дальше программа сделает ровно то, что "
+            "написано на кнопке. «Отмена» не делает ничего.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Согласен")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+
+class LmarenaTokenDialog(QDialog):
+    """Токен арены: вписать свежую куку `arena-auth-prod-v1`.
+
+    Токен берётся человеком в своём браузере — README форка описывает
+    именно этот путь (отправить сообщение на сайте, открыть средства
+    разработки, скопировать куку, начинается с `base64-`). Программа его
+    только сохраняет: файлом рядом с настройками opencode, откуда он
+    уезжает в config.json моста. В настройки opencode, в журнал и в
+    сообщения окна токен не попадает.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Токен арены для моста LMArena")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Как взять токен (путь из README форка): открой сайт арены, "
+            "отправь там сообщение любой модели, нажми F12, открой "
+            "«Application» → «Cookies», найди куку arena-auth-prod-v1 и "
+            "скопируй её значение целиком — оно начинается с base64-.",
+            wrap=True,
+        ))
+        box.addWidget(ui.label(
+            "Токен ляжет файлом " + lmarena.TOKEN_NAME + " рядом с "
+            "настройками opencode и в репозиторий не попадёт. В сам мост "
+            "он уезжает при «Запустить» и «Перезапустить». Свежий токен "
+            "заменяет прежний: старый мог протухнуть.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        self.token = QLineEdit()
+        self.token.setPlaceholderText("base64-…")
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token.setToolTip(
+            "Значение куки. Показывается точками: это секрет, и он должен "
+            "попадать в журнал как можно реже"
+        )
+        self.show_token = QCheckBox("Показать токен")
+        self.show_token.toggled.connect(
+            lambda on: self.token.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        box.addWidget(self.token)
+        box.addWidget(self.show_token)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Сохранить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _save(self) -> None:
+        messages, errors = lmarena.save_token(self.dest, self.token.text())
+        if errors:
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
 class CapsTab(ScrollPage):
     """Возможности базы для opencode — установка по выбору.
 
@@ -2917,6 +3041,43 @@ class CapsTab(ScrollPage):
             "ответе нет"
         )
         self.btn_or_status.setEnabled(False)
+        # Кнопки моста LMArena. Своя строка и своя работа: развернуть
+        # окружение форка, поднять мост, перезапустить его, показать
+        # состояние и положить токен арены. В opencode ничего из этого не
+        # пишет — пишет только автонастройка, и только после ответа модели.
+        self.btn_lm_deploy = QPushButton("Развернуть")
+        self.btn_lm_deploy.setToolTip(
+            "LMArena: поставить окружение моста (.venv) и его зависимости "
+            "из requirements.txt в папку tools/thirdparty/lmarena. Код форка "
+            "уже в репозитории; чужие папки пакетов не трогаются"
+        )
+        self.btn_lm_deploy.setEnabled(False)
+        self.btn_lm_start = QPushButton("Запустить")
+        self.btn_lm_start.setToolTip(
+            "LMArena: перенести токен из файла рядом с настройками в "
+            "config.json моста и поднять его на http://127.0.0.1:8000. "
+            "Перед первым запуском программа покажет предупреждения"
+        )
+        self.btn_lm_start.setEnabled(False)
+        self.btn_lm_restart = QPushButton("Перезапустить")
+        self.btn_lm_restart.setToolTip(
+            "LMArena: остановить мост и поднять заново — так лечится "
+            "зависший мост и так же подхватывается обновлённый токен"
+        )
+        self.btn_lm_restart.setEnabled(False)
+        self.btn_lm_status = QPushButton("Показать статус")
+        self.btn_lm_status.setToolTip(
+            "LMArena: что развёрнуто, отвечает ли мост, есть ли токен "
+            "арены и сколько моделей он знает. Токена самого в ответе нет"
+        )
+        self.btn_lm_status.setEnabled(False)
+        self.btn_lm_token = QPushButton("Обновить токен")
+        self.btn_lm_token.setToolTip(
+            "LMArena: вписать свежую куку arena-auth-prod-v1 с сайта арены. "
+            "Токен ляжет файлом рядом с настройками opencode и уедет в "
+            "config.json моста, а не в настройки opencode"
+        )
+        self.btn_lm_token.setEnabled(False)
         row_mcp.addWidget(self.btn_reg_check)
         row_mcp.addWidget(self.btn_reg_on)
         row_mcp.addWidget(self.btn_reg_auto)
@@ -2930,6 +3091,11 @@ class CapsTab(ScrollPage):
         row_mcp.addWidget(self.btn_or_start)
         row_mcp.addWidget(self.btn_or_restart)
         row_mcp.addWidget(self.btn_or_status)
+        row_mcp.addWidget(self.btn_lm_deploy)
+        row_mcp.addWidget(self.btn_lm_start)
+        row_mcp.addWidget(self.btn_lm_restart)
+        row_mcp.addWidget(self.btn_lm_status)
+        row_mcp.addWidget(self.btn_lm_token)
         row_mcp.addStretch(1)
         mcp_layout.addLayout(row_mcp)
 
@@ -2980,6 +3146,11 @@ class CapsTab(ScrollPage):
         self.btn_or_start.clicked.connect(self._or_start)
         self.btn_or_restart.clicked.connect(self._or_restart)
         self.btn_or_status.clicked.connect(self._or_status)
+        self.btn_lm_deploy.clicked.connect(self._lm_deploy)
+        self.btn_lm_start.clicked.connect(self._lm_start)
+        self.btn_lm_restart.clicked.connect(self._lm_restart)
+        self.btn_lm_status.clicked.connect(self._lm_status)
+        self.btn_lm_token.clicked.connect(self._lm_token)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -3044,22 +3215,22 @@ class CapsTab(ScrollPage):
 
     # Серверы, которые программа умеет настроить целиком сама.
     AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub",
-                    "browsers", "omniroute")
+                    "browsers", "omniroute", "lmarena")
 
     def _reg_auto_possible(self, server: mcp_registry.Server | None) -> tuple[bool, str]:
         """Можно ли настроить автоматически и что этому мешает.
 
-        Автонастройка умеет ровно шесть вещей: Android Studio, OBS,
-        эмулятор Android, DBHub, браузеры и OmniRoute. Остальные серверы
-        запускаются командой, и «Настроить автоматически» для них был бы
-        кнопкой вроде работающей.
+        Автонастройка умеет ровно семь вещей: Android Studio, OBS,
+        эмулятор Android, DBHub, браузеры, OmniRoute и LMArena. Остальные
+        серверы запускаются командой, и «Настроить автоматически» для них
+        был бы кнопкой вроде работающей.
         """
         if server is None:
             return False, (
                 "Выберите строку в списке: автонастройка есть у Android "
-                "Studio, OBS, Android-эмулятора, DBHub, Браузеров и "
-                "OmniRoute. У LDPlayer она не нужна — ему достаточно кнопки "
-                "«Включить»."
+                "Studio, OBS, Android-эмулятора, DBHub, Браузеров, "
+                "OmniRoute и LMArena. У LDPlayer она не нужна — ему "
+                "достаточно кнопки «Включить»."
             )
         if server.id not in self.AUTO_SERVERS:
             return False, (
@@ -3218,6 +3389,14 @@ class CapsTab(ScrollPage):
         self.btn_or_start.setEnabled(is_or)
         self.btn_or_restart.setEnabled(is_or)
         self.btn_or_status.setEnabled(is_or)
+        # Кнопки LMArena — только у своей строки: у остальных серверов нет
+        # ни окружения форка, ни токена арены.
+        is_lm = server is not None and server.id == "lmarena"
+        self.btn_lm_deploy.setEnabled(is_lm)
+        self.btn_lm_start.setEnabled(is_lm)
+        self.btn_lm_restart.setEnabled(is_lm)
+        self.btn_lm_status.setEnabled(is_lm)
+        self.btn_lm_token.setEnabled(is_lm)
         if is_db:
             sources = dbhub.read_sources(self._reg_dest() or Path())
             if sources:
@@ -3247,6 +3426,19 @@ class CapsTab(ScrollPage):
                 "это и есть доказательство, что браузер работает. «Настроить "
                 "автоматически» делает то же и вписывает сервер в настройки "
                 "opencode."
+            )
+        elif is_lm:
+            token = ("токен арены уже вписан" if lmarena.token_present(
+                self._reg_dest() or Path()) else
+                "токена арены пока нет — без него моделей не будет")
+            self.reg_hint.setText(
+                "Порядок: «Развернуть» (окружение моста и зависимости), "
+                "«Обновить токен» (кука arena-auth-prod-v1 с сайта арены — "
+                f"{token}), «Запустить» (мост на http://127.0.0.1:8000), "
+                "«Показать статус», затем «Настроить автоматически»: она "
+                "спросит у модели ответ и только потом впишет мост и "
+                "провайдера с моделями арены в настройки opencode. Мост "
+                "выключен по умолчанию и включается после предупреждений."
             )
         elif is_or:
             self.reg_hint.setText(
@@ -3380,6 +3572,13 @@ class CapsTab(ScrollPage):
         # тем же путём, что автонастройка: сначала живая проверка связи,
         # и только потом запись.
         if server.id == "dbhub":
+            self._reg_auto()
+            return
+
+        # У моста LMArena «Включить» идёт тем же путём, что автонастройка:
+        # без токена арены и ответа модели блок в настройках был бы
+        # нерабочим, а сам мост включается только после предупреждений.
+        if server.id == "lmarena":
             self._reg_auto()
             return
 
@@ -3565,14 +3764,116 @@ class CapsTab(ScrollPage):
         # видно, не открывая журнал.
         self._reg_show_detail()
 
+    def _lm_target(self) -> Path | None:
+        """Папка настроек и строка LMArena — общая проверка для кнопок.
+
+        Пять кнопок моста делают разное, но требование у них одно:
+        выбрана папка настроек opencode и выделена строка «LMArena».
+        Иначе нажатие трогало бы чужую строку.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return None
+        if server is None or server.id != "lmarena":
+            self._warn("Это работа строки «LMArena». Выберите её в списке.")
+            return None
+        return dest
+
+    def _lm_confirm(self) -> bool:
+        """Спрашивает согласие на работу через веб-сервис арены.
+
+        Мост выключен по умолчанию, поэтому согласие спрашивается перед
+        каждым включением: один раз прочитанное предупреждение не должно
+        превращаться в «я когда-то нажал галочку».
+        """
+        dialog = LmarenaWarningDialog(self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _lm_deploy(self) -> None:
+        """Ставит окружение моста и зависимости. В opencode не пишет."""
+        dest = self._lm_target()
+        if dest is None:
+            return
+
+        def job(progress):
+            return lmarena.deploy(progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_start(self) -> None:
+        """Поднимает мост и ждёт ответа API. В opencode ничего не пишет."""
+        dest = self._lm_target()
+        if dest is None or not self._lm_confirm():
+            return
+
+        def job(progress):
+            return lmarena.bring_up(dest, progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_restart(self) -> None:
+        """Перезапускает мост: так лечится зависший и подхватывается токен."""
+        dest = self._lm_target()
+        if dest is None or not self._lm_confirm():
+            return
+
+        def job(progress):
+            return lmarena.restart(dest, progress=progress)
+
+        self._start(job, "lmarena")
+
+    def _lm_status(self) -> None:
+        """Показывает состояние моста словами: ничего не меняет."""
+        dest = self._lm_target()
+        if dest is None:
+            return
+        text = lmarena.status_text(dest)
+        self.log.clear_log()
+        self.log.add(text, "ok" if "отвечает" in text else "warn")
+        self._reg_show_detail()
+
+    def _lm_token(self) -> None:
+        """Спрашивает свежий токен арены и кладёт его рядом с настройками.
+
+        Мост читает токен только из своего config.json, поэтому после
+        сохранения предлагается перезапуск: список моделей мост тянет с
+        арены на старте и раз в полчаса, а не по каждому запросу.
+        """
+        dest = self._lm_target()
+        if dest is None:
+            return
+        dialog = LmarenaTokenDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        if lmarena.deployed() and lmarena.health(dest, timeout=3)[0]:
+            answer = QMessageBox.question(
+                self,
+                "Мост уже запущен",
+                "Токен сохранён. Мост уже запущен — перезапустить его "
+                "сейчас, чтобы он сразу взял новый токен и перечитал "
+                "список моделей с арены?\n\nЭто то же, что кнопка "
+                "«Перезапустить».",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._lm_restart()
+        self._reg_show_detail()
+
     def _reg_auto(self) -> None:
         """Настраивает сервер целиком, без конфигураций вручную.
 
-        Автонастройка умеет Android Studio, OBS, эмулятор, DBHub, браузеры
-        и OmniRoute. У DBHub она упирается в подключение: без вписанной
-        базы проверять нечего, поэтому сначала предлагается «Добавить
-        подключение». У OmniRoute порядок другой: развернуть, запустить,
-        получить ответ API — и только потом писать в настройки.
+        Автонастройка умеет Android Studio, OBS, эмулятор, DBHub, браузеры,
+        OmniRoute и LMArena. У DBHub она упирается в подключение: без
+        вписанной базы проверять нечего, поэтому сначала предлагается
+        «Добавить подключение». У OmniRoute порядок другой: развернуть,
+        запустить, получить ответ API — и только потом писать в настройки.
+        У LMArena так же, но проверка строже: живой ответ модели через
+        арену. Не ответила — в настройки не пишется ничего.
         """
         dest = self._reg_dest()
         if dest is None:
@@ -3614,6 +3915,11 @@ class CapsTab(ScrollPage):
             if password is None:
                 return
 
+        # Мост LMArena спрашивает согласие каждый раз: он работает через
+        # веб-сервис арены, и «я согласился когда-то раньше» тут не годится.
+        if server.id == "lmarena" and not self._lm_confirm():
+            return
+
         def job(progress):
             if server.id == "android-studio":
                 return android_studio.auto_setup(dest, server, progress=progress)
@@ -3627,6 +3933,8 @@ class CapsTab(ScrollPage):
                 return browsers.auto_setup(dest, server, progress=progress)
             if server.id == "omniroute":
                 return omniroute.auto_setup(dest, server, progress=progress)
+            if server.id == "lmarena":
+                return lmarena.auto_setup(dest, server, progress=progress)
             return bridges.auto_setup_emulator(dest, server, progress=progress)
 
         self._start(job, "registry")
@@ -4009,7 +4317,37 @@ class CapsTab(ScrollPage):
                     antiblock_opts=self._antiblock_opts(),
                 )
             if pselection:
-                m2, e2 = opencode_caps.install_providers(dest, pselection, progress=progress)
+                # У LMArena блок провайдера собирается из живого моста:
+                # имена моделей называет арена, и выдумать их нельзя. Мост
+                # молчит — пропускаем его и говорим словами, а не пишем
+                # провайдера без моделей.
+                chosen = set(pselection)
+                blocks: dict[str, str] = {}
+                lm_names: list[str] = []
+                if "lmarena" in chosen:
+                    names, note = lmarena.chat_models(dest)
+                    if names:
+                        lm_names = names
+                        blocks["lmarena"] = lmarena.provider_block(names)
+                    else:
+                        chosen.discard("lmarena")
+                        e2.append(
+                            "LMArena пропущен: модели моста не прочитались ("
+                            + (note or "список пуст")
+                            + "). Запусти мост и обнови токен — тогда "
+                            "список моделей подставится сам."
+                        )
+                if chosen:
+                    m2, e2 = opencode_caps.install_providers(
+                        dest, chosen, progress=progress, blocks=blocks)
+                    m2 = list(m2)
+                    if "lmarena" in chosen:
+                        m2.append(
+                            f"Провайдер LMArena вписан с моделями арены: "
+                            f"{len(lm_names)}."
+                        )
+                else:
+                    m2 = []
             return (m1 + m2, e1 + e2)
 
         self._start(job, "install")
