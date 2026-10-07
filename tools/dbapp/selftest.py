@@ -5596,20 +5596,20 @@ def main() -> int:
         # человек с Node 20 увидел бы «готово» и получил отказ при запуске.
         # Проверяем не текст, а поведение движка: команда печатает версию,
         # движок её читает и сравнивает с порогом.
-        _req_old = _mcp_registry.Requirement(
-            what="пример", kind="command", value=sys.executable,
-            args=["-c", "print('20.11.0')"], min_version=22)
-        _mcp_registry.check_requirement(_req_old)
+        _req_old = _mcp_registry.check_requirement({
+            "what": "пример", "type": "command", "check": sys.executable,
+            "args": ["-c", "print('20.11.0')"], "min_version": 22})
         check(_req_old.ok is False and "22" in _req_old.detail,
               f"Node.js 20 при пороге 22 — не подходит: {_req_old.detail}")
-        _req_new = _mcp_registry.Requirement(
-            what="пример", kind="command", value=sys.executable,
-            args=["-c", "print('22.5.0')"], min_version=22)
-        _mcp_registry.check_requirement(_req_new)
+        _req_new = _mcp_registry.check_requirement({
+            "what": "пример", "type": "command", "check": sys.executable,
+            "args": ["-c", "print('22.5.0')"], "min_version": 22})
         check(_req_new.ok is True,
               f"Node.js 22 при пороге 22 — подходит: {_req_new.detail}")
-        _dbhub_requires = next(s for s in _servers if s.id == "dbhub").requires
-        _node_in_dbhub = next((r for r in _dbhub_requires if r.value == "node"), None)
+        _dbhub_srv = next((s for s in _servers if s.id == "dbhub"), None)
+        _node_in_dbhub = next(
+            (r for r in (_dbhub_srv.requirements if _dbhub_srv else [])
+             if r.value == "node"), None)
         check(_node_in_dbhub is not None and _node_in_dbhub.min_version == 22,
               "у dbhub порог Node.js 22 — из engines пакета, а не обещание 18+")
 
