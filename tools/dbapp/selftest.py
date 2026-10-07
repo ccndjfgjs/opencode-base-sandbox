@@ -5945,7 +5945,7 @@ def main() -> int:
           "галочки rtk и caveman есть в списке вкладки opencode")
     check({name for name, _title in opencode_caps.CAPS} >= {"rtk", "caveman"},
           "и в общем списке возможностей — иначе их не примет установка")
-    check(set(opencode_caps.CAPS_OFF_BY_DEFAULT) == {"rtk", "caveman"},
+    check({"rtk", "caveman"} <= set(opencode_caps.CAPS_OFF_BY_DEFAULT),
           "обе галочки по умолчанию сняты: включать их молча нельзя")
     _tk_main = (_tk_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
     for _tk_bit, _tk_why in (
@@ -6265,6 +6265,453 @@ def main() -> int:
     finally:
         _tk_rtk.find_binary, _tk_rtk._run = _tk_saved
         shutil.rmtree(_tk_tmp, ignore_errors=True)
+
+    # ---- 8к. pxpipe: сжатие запроса картинками, не MCP. -------------------
+    # По §7 инструкции это не сервер: в mcp-registry.json его быть не должно.
+    # Прокси — чужая программа из npm (пакет pxpipe-proxy). Скачать её в
+    # самопроверке нельзя: это зависит от сети и от машины. Поэтому поведение
+    # проверяется на заглушке того же устройства: она отвечает панелью и
+    # пересылает запрос, как настоящий прокси по README автора. Это проверка
+    # нашего кода, а не доказательство экономии: экономию и «влезает больше»
+    # человек мерит на своей машине кнопками.
+    import socket as _px_socket  # noqa: PLC0415
+    import urllib.request as _px_url  # noqa: PLC0415
+    import pxpipe as _px  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _px_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8к. pxpipe: сжатие запроса картинками ---")
+
+    _px_root = core.program_root()
+    _px_third = _px_root / "tools" / "thirdparty" / "pxpipe"
+
+    # Копия лицензии автора — байт в байт из npm-пакета, который запускаем.
+    _px_lic = _px_third / "LICENSE"
+    check(_px_lic.is_file(), "pxpipe: текст лицензии MIT лежит рядом")
+    if _px_lic.is_file():
+        check(_tk_blob(_px_lic) == _px.LICENSE_BLOB,
+              f"pxpipe: лицензия — байт в байт из пакета (blob {_px.LICENSE_BLOB[:8]})")
+    _px_readme = _px_third / "README.md"
+    check(_px_readme.is_file(), "pxpipe: рядом наш README — что взято и чего не делаем")
+    _px_readme_text = _px_readme.read_text(encoding="utf-8") if _px_readme.is_file() else ""
+    for _px_bit, _px_why in (
+        ("pxpipe-proxy@0.14.0", "закреплённая версия пакета"),
+        ("127.0.0.1:47821", "адрес прокси из README автора"),
+        ("не MCP", "сказано, что это не MCP-сервер"),
+        ("59–70%", "цифры автора названы его заявлениями"),
+        ("независимо не провер", "и что независимой проверки нет"),
+        ("pxpipe-windows", "оговорка про Windows сказана честно"),
+    ):
+        check(_px_bit in _px_readme_text, f"pxpipe: в README — {_px_why} ({_px_bit})")
+
+    # Команда и адрес — из README автора, ничего не выдумано.
+    check(_px.PACKAGE == "pxpipe-proxy" and _px.PACKAGE_VERSION == "0.14.0",
+          f"pxpipe: пакет и версия — {_px.PACKAGE}@{_px.PACKAGE_VERSION}")
+    check(_px.PORT == 47821 and _px.HOST == "127.0.0.1",
+          f"pxpipe: адрес по умолчанию — {_px.HOST}:{_px.PORT} (из README автора)")
+    _px_launch = _px.launch_command()
+    check(_px_launch[-1].endswith("pxpipe-proxy@0.14.0") and "--yes" in _px_launch,
+          f"pxpipe: команда запуска — {_px_launch}")
+
+    # Предупреждение: заявления автора названы заявлениями, риск — прямо.
+    for _px_bit in ("59–70%", "независимо не проверенное", "неверно", "включай"):
+        check(_px_bit in _px.WARNING, f"pxpipe: в предупреждении сказано про {_px_bit}")
+
+    # Не MCP: в реестре серверов его нет.
+    _px_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _px_ids = {str(s.get("id")) for s in _px_registry.get("servers", [])}
+    check("pxpipe" not in _px_ids,
+          "pxpipe не записан сервером MCP — это прокси, а не сервер")
+
+    # Уведомления и правила базы знают про pxpipe.
+    _px_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _px_bit in ("teamchong/pxpipe", "pxpipe-proxy", "6b5f347b", "59–70%"):
+        check(_px_bit in _px_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и цифры: {_px_bit}")
+    _px_agents = (_px_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("pxpipe" in _px_agents and "не MCP" in _px_agents,
+          "config/AGENTS.md: про pxpipe сказано, и что это не MCP")
+
+    # Галочка и установка знают pxpipe своим модулем.
+    _px_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    _px_caps = {name for name, _title in opencode_caps.CAPS}
+    check("pxpipe" in _px_choices and "pxpipe" in _px_caps,
+          "галочка pxpipe есть и в списке вкладки, и в общем списке возможностей")
+    check("pxpipe" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка pxpipe снята по умолчанию: такое включают осознанно")
+    _px_caps_src = (_px_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _px_bit in ("_pxpipe_module", "pxpipe_provider",
+                    "_pxpipe_module().install", "_pxpipe_module().remove"):
+        check(_px_bit in _px_caps_src,
+              f"установка возможностей зовёт pxpipe своим модулем ({_px_bit})")
+    _px_main = (_px_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _px_bit, _px_why in (
+        ("Запустить pxpipe", "кнопка запуска"),
+        ("Остановить pxpipe", "кнопка остановки"),
+        ("Проверить pxpipe", "кнопка живой проверки"),
+        ("Числа pxpipe", "кнопка счётчиков"),
+        ("PxpipeWarningDialog", "окно-предупреждение"),
+        ("Источник для pxpipe", "выбор источника запросов"),
+        ("pxpipe_provider=px_source", "передача источника в установку"),
+    ):
+        check(_px_bit in _px_main, f"вкладка opencode: {_px_why} ({_px_bit})")
+
+    # ---- поведение: отказы, запись и уборка во временной папке.
+    _px_tmp = Path(tempfile.mkdtemp(prefix="px-caps-"))
+    _px_saved = (_px.find_npx, _px._run, _px.launch_command)
+    _px_saved_port = _tk_os.environ.get("PXPIPE_PORT")
+    _px_stub_proc: list = []
+
+    def _px_free_port() -> int:
+        """Свободный порт: занимаем и сразу отдаём — так его не выберет другой."""
+        with _px_socket.socket() as _s:
+            _s.bind(("127.0.0.1", 0))
+            return int(_s.getsockname()[1])
+
+    _PX_STUB = (
+        "import json, os, sys\n"
+        "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+        "PORT = int(os.environ['PORT'])\n"
+        "LOG = os.environ.get('PXPIPE_LOG', '')\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    protocol_version = 'HTTP/1.1'\n"
+        "    def _send(self, code, text, kind='text/html; charset=utf-8'):\n"
+        "        raw = text.encode('utf-8')\n"
+        "        self.send_response(code)\n"
+        "        self.send_header('content-type', kind)\n"
+        "        self.send_header('content-length', str(len(raw)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(raw)\n"
+        "    def do_GET(self):\n"
+        "        if self.path == '/':\n"
+        "            self._send(200, '<html><title>pxpipe dashboard</title></html>')\n"
+        "        else:\n"
+        "            self._send(200, json.dumps({'object': 'list', 'data': []}),\n"
+        "                       'application/json')\n"
+        "    def do_POST(self):\n"
+        "        n = int(self.headers.get('content-length') or 0)\n"
+        "        raw = self.rfile.read(n) if n else b''\n"
+        "        if LOG:\n"
+        "            with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "                f.write(json.dumps({'method': 'POST', 'path': self.path,\n"
+        "                                    'bytes': len(raw)}) + '\\n')\n"
+        "        self._send(200, json.dumps({'ok': True, 'path': self.path}),\n"
+        "                   'application/json')\n"
+        "    def log_message(self, *a):\n"
+        "        pass\n"
+        "ThreadingHTTPServer(('127.0.0.1', PORT), H).serve_forever()\n"
+    )
+    _px_stub = _px_tmp / "px_stub.py"
+    _px_stub.write_text(_PX_STUB, encoding="utf-8")
+    _px_port = _px_free_port()
+    _px_foreign_port = _px_free_port()
+    _tk_os.environ["PXPIPE_PORT"] = str(_px_port)
+    _px.launch_command = lambda: [sys.executable, str(_px_stub)]
+    _px.find_npx = lambda: sys.executable
+    _px_spawn = _tk_sp
+
+    def _px_right_off() -> None:
+        """Гасит заглушки, если что-то пошло не так до уборки."""
+        for _proc in _px_stub_proc:
+            try:
+                _proc.kill()
+                _proc.wait(timeout=15)
+            except Exception:
+                pass
+        _px_stub_proc.clear()
+
+    def _px_stub_events() -> int:
+        """Сколько строк дописала заглушка в журнал прокси."""
+        path = _px.events_file(_px_dest)
+        if not path.is_file():
+            return 0
+        return len([line for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()])
+
+    try:
+        # Случай «прокси не запущен». Проверка идёт ДО записи: в настройки не
+        # должно попасть ничего, вплоть до создания файла настроек.
+        _px_dest = _px_tmp / "settings"
+        _px_dest.mkdir()
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        check(any("не включён" in x for x in _px_e)
+              and any("ничего не вписано" in x for x in _px_e),
+              f"без прокси установка отказывает: {_px_e[:1]}")
+        check(not (_px_dest / "opencode.jsonc").exists(),
+              "и файл настроек ради отказа не создаётся")
+        check(not (_px_dest / "pxpipe-data").exists(),
+              "и папка данных прокси не заводится")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e and any("не запущен" in x for x in _px_m),
+              f"остановка без прокси — не ошибка, а «и так не запущен»: {_px_m}")
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(bool(_px_e) and any("Журнала" in x for x in _px_e),
+              f"счётчики без журнала не выдумывают числа: {_px_e[:1]}")
+        check(not _px.dashboard_ok(timeout=3)[0],
+              "на порту пока пусто — панель не отвечает")
+
+        # Случай «npx не поставлен»: и запуск, и счётчики честно отказывают,
+        # а не делают вид, что прокси поднялся.
+        _px.find_npx = lambda: None
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("npx не найден" in x for x in _px_e),
+              f"без npx запуск не выдумывается, а отказывает: {_px_e[:1]}")
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(bool(_px_e) and any("npx не найден" in x for x in _px_e),
+              f"и счётчики без npx не считаются: {_px_e[:1]}")
+        check(not _px.pid_file(_px_dest).exists(),
+              "и файла процесса после отказа нет")
+        _px.find_npx = lambda: sys.executable
+
+        # Чужой прокси: поднят мимо программы. Ни остановить, ни вписать его
+        # нельзя — куда он пересылает запросы, программе неизвестно.
+        _tk_os.environ["PXPIPE_PORT"] = str(_px_foreign_port)
+        _px_foreign_env = dict(_tk_os.environ)
+        _px_foreign_env["PORT"] = str(_px_foreign_port)
+        _px_foreign_log = _px_tmp / "foreign-stub.log"
+        with open(_px_foreign_log, "ab") as _px_fh:
+            _px_stub_proc.append(_px_spawn.Popen(
+                [sys.executable, str(_px_stub)], env=_px_foreign_env,
+                stdout=_px_fh, stderr=_px_fh, start_new_session=True))
+        # Ждём ответа с повтором: сразу после запуска панель ещё не слушает.
+        _px_ok, _px_note = _px.wait_dashboard(timeout=30)
+        check(_px_ok,
+              f"чужая панель отвечает, как настоящая: {_px_note[:40]} "
+              f"{_px_foreign_log.read_text(encoding='utf-8')[-200:]}")
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("не программой" in x for x in _px_e),
+              f"запись под чужой прокси не делается: {_px_e[:1]}")
+        check(not (_px_dest / "opencode.jsonc").exists(),
+              "и файл настроек после отказа по-прежнему не создан")
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(bool(_px_e) and any("не программой" in x for x in _px_e)
+              and not _px.pid_file(_px_dest).exists(),
+              f"запуск поверх чужого прокси отказывает, а не плодит второй: "
+              f"{_px_e[:1]}")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(bool(_px_e) and any("не наш" in x for x in _px_e)
+              and _px.dashboard_ok(timeout=5)[0],
+              "чужой прокси программа не гасит — только говорит, что он не её")
+        _px_right_off()
+
+        # Свой прокси: поднимает программа — и только теперь пишет настройки.
+        _tk_os.environ["PXPIPE_PORT"] = str(_px_port)
+        _px_cfg = _px_dest / "opencode.jsonc"
+        _px_cfg.write_text(
+            '{\n'
+            '  // чужой комментарий: его трогать нельзя\n'
+            '  "provider": {\n'
+            '    "pxsrc": {\n'
+            '      "npm": "@ai-sdk/openai-compatible",\n'
+            '      "name": "заглушка-провайдер",\n'
+            '      "options": {\n'
+            '        "baseURL": "http://127.0.0.1:59999/v1",\n'
+            '        "apiKey": "sk_stub"\n'
+            '      },\n'
+            '      "models": {\n'
+            '        "qwen3": {"name": "qwen3"},\n'
+            '        "claude-fable-5": {"name": "fable"}\n'
+            '      }\n'
+            '    }\n'
+            '  }\n'
+            '}\n',
+            encoding="utf-8")
+        _px_cfg_before = _px_cfg.read_text(encoding="utf-8")
+        _px_m, _px_e = _px.start(_px_dest, "pxsrc")
+        check(not _px_e and any("панель pxpipe отвечает" in x or "отвечает" in x
+                               for x in _px_m),
+              f"свой прокси поднимается и панель отвечает: {_px_m[-1:]}")
+        _px_info = _px._launch_info(_px_dest)
+        check(_px_info.get("pid") and _px_info.get("provider") == "pxsrc",
+              f"в файле процесса записан наш запуск и источник: {_px_info}")
+        check(_px_info.get("upstream") == "http://127.0.0.1:59999",
+              f"адрес пересылки — без хвоста /v1 (в коде автора путь идёт как "
+              f"есть): {_px_info.get('upstream')}")
+
+        _px_m, _px_e = _px.install(_px_dest, "другого-нет")
+        check(bool(_px_e) and any("выбран" in x for x in _px_e),
+              f"другой источник не принимается: {_px_e[:1]}")
+        check(_px_cfg.read_text(encoding="utf-8") == _px_cfg_before,
+              "после отказов файл настроек остался ровно таким, каким был")
+
+        _px_m, _px_e = _px.install(_px_dest, "pxsrc")
+        _px_text = _px_cfg.read_text(encoding="utf-8")
+        check(not _px_e and _px.PROVIDER in _px_text,
+              f"провайдер pxpipe вписан: {_px_e}")
+        check(_px_text.count("== OpenCode_Base: provider.pxpipe ==") == 1
+              and _px_text.count("конец provider.pxpipe ==") == 1,
+              "метки вокруг нашей записи стоят ровно парой")
+        check("чужой комментарий: его трогать нельзя" in _px_text,
+              "чужой комментарий в настройках цел")
+        check('"baseURL": "' + _px.base_url() + '/v1"' in _px_text,
+              f"адрес записи смотрит на прокси: {_px.base_url()}/v1")
+        check('"apiKey": "sk_stub"' in _px_text,
+              "ключ источника скопирован в запись — иначе прокси не пройдёт дальше")
+        check('"qwen3"' in _px_text and '"claude-fable-5"' in _px_text,
+              "список моделей скопирован от источника, а не выдуман")
+        check(opencode_caps.check_jsonc(_px_text),
+              "настройки после записи остаются разбираемым JSONC")
+        _px_manifest = opencode_caps.read_manifest(_px_dest)
+        check(_px_manifest.get("pxpipe", {}).get("source") == "pxsrc",
+              f"в манифесте записано, чьи модели стоят в записи: "
+              f"{_px_manifest.get('pxpipe')}")
+
+        # Живой запрос через прокси: уходит прокси и доходит до него целым.
+        _px_req = _px_url.Request(
+            _px.base_url() + "/v1/chat/completions",
+            data=json.dumps({"model": "qwen3",
+                             "messages": [{"role": "user", "content": "привет"}]}
+                            ).encode("utf-8"),
+            headers={"content-type": "application/json"})
+        with _px_url.urlopen(_px_req, timeout=30) as _px_answer:
+            _px_body = json.loads(_px_answer.read().decode("utf-8"))
+        check(_px_answer.status == 200 and _px_body.get("ok") is True
+              and _px_body.get("path") == "/v1/chat/completions",
+              f"обычный запрос проходит через прокси без ошибок: {_px_body}")
+        check(_px_stub_events() == 1,
+              "прокси получил запрос и записал его в свой журнал")
+
+        # Повторное включение файл не переписывает: иначе opencode поднимал бы
+        # серверы заново на каждое нажатие.
+        _px_bytes = _px_cfg.read_bytes()
+        _px_m2, _px_e2 = _px.install(_px_dest, "pxsrc")
+        check(_px_cfg.read_bytes() == _px_bytes
+              and any("не менялся" in x for x in _px_m2),
+              f"повторное «Включить» файл не переписывает: {_px_m2[-1:]}")
+        check(not _px_e2, f"и это не ошибка: {_px_e2}")
+
+        # Счётчики: числа берутся у самого прокси, а не выдумываются.
+        _px_saved_run = _px._run
+
+        def _px_fake_stats(args, timeout):
+            return 0, "requests: 1\ncompressed: 1 (100.0%)", ""
+
+        _px._run = _px_fake_stats
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(not _px_e and any("compressed" in x for x in _px_m),
+              f"счётчики показывают то, что напечатал пакет: {_px_m[:2]}")
+
+        def _px_fail_stats(args, timeout):
+            return 1, "", "events file not found"
+
+        _px._run = _px_fail_stats
+        _px_m, _px_e = _px.stats(_px_dest)
+        check(not _px_m and bool(_px_e),
+              "неудачный опрос счётчиков — это ошибка, а не выдуманные числа")
+        _px._run = _px_saved_run
+
+        # Состояние и выбор источника — словами и без нашей же записи в списке.
+        _px_status = _px.status(_px_dest)
+        check(_px_status.get("running") is True and _px_status.get("ours") is True
+              and _px_status.get("installed") is True,
+              f"состояние видит и прокси, и запись: {_px_status}")
+        _px_choices_now = _px.provider_choices(_px_dest)
+        check("pxsrc" in _px_choices_now and _px.PROVIDER not in _px_choices_now,
+              f"источником предлагаются чужие провайдеры, но не наша запись: "
+              f"{_px_choices_now}")
+
+        # Уборка: наша запись уходит, чужое остаётся, прокси гасится отдельно.
+        _px_m, _px_e = _px.remove(_px_dest)
+        _px_text = _px_cfg.read_text(encoding="utf-8")
+        check(not _px_e and "provider.pxpipe" not in _px_text,
+              f"наша запись убрана: {_px_e}")
+        check("чужой комментарий: его трогать нельзя" in _px_text
+              and '"pxsrc"' in _px_text,
+              "чужое после уборки цело")
+        check(opencode_caps.check_jsonc(_px_text),
+              "и настройки после уборки разбираются")
+        _px_m, _px_e = _px.remove(_px_dest)
+        check(not _px_e and any("убирать нечего" in x for x in _px_m),
+              "повторная уборка — не ошибка, а «убирать нечего»")
+        check(_px.dashboard_ok(timeout=5)[0],
+              "уборка записи прокси не гасит: его гасят отдельной кнопкой")
+
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e, f"свой прокси гасится: {_px_e}")
+        check(not _px.dashboard_ok(timeout=3)[0],
+              "после остановки панель больше не отвечает")
+        check(not _px.pid_file(_px_dest).exists(),
+              "и файл процесса убран — чужой процесс им не считается")
+        _px_m, _px_e = _px.stop(_px_dest)
+        check(not _px_e and any("не запущен" in x for x in _px_m),
+              "повторная остановка — не ошибка, а «и так не запущен»")
+        _px_right_off()
+
+        # Командная строка — то же, что кнопки. Живого прокси тут нет, поэтому
+        # принимаются оба исхода: важно, что она отвечает словами и не врёт.
+        _px_cli = _px_root / "tools" / "dbapp" / "pxpipe.py"
+        _px_env = dict(_tk_os.environ)
+        _px_env["OPENCODE_CONFIG_DIR"] = str(_px_dest)
+        _px_env["PXPIPE_PORT"] = str(_px_port)
+        _px_run = _px_spawn.run([sys.executable, str(_px_cli), "status"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                env=_px_env, timeout=90)
+        check(_px_run.returncode == 0 and "провайдер pxpipe" in _px_run.stdout,
+              f"командная строка pxpipe говорит состояние: "
+              f"{_px_run.stdout.strip()[:70]}")
+        _px_run = _px_spawn.run([sys.executable, str(_px_cli), "install", "pxsrc"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                env=_px_env, timeout=90)
+        check(_px_run.returncode == 1 and "ничего не вписано" in _px_run.stdout,
+              f"и отказывает без прокси, как кнопка: "
+              f"{_px_run.stdout.strip()[:70]}")
+
+        # Окно: галочка снята, кнопки на месте, предупреждение спрашивается.
+        _px_tab = window.caps_tab
+        check("pxpipe" in _px_tab.checks and not _px_tab.checks["pxpipe"].isChecked(),
+              "на вкладке opencode галочка pxpipe есть и снята по умолчанию")
+        for _px_attr in ("btn_px_run", "btn_px_stop", "btn_px_check", "btn_px_stats",
+                         "pxpipe_source"):
+            check(hasattr(_px_tab, _px_attr),
+                  f"на вкладке есть орган управления: {_px_attr}")
+        check(all(getattr(_px_tab, name).isEnabled()
+                  for name in ("btn_px_run", "btn_px_stop", "btn_px_check",
+                               "btn_px_stats")),
+              "кнопки pxpipe доступны")
+        _px_saved_dialog = _px_app.PxpipeWarningDialog
+
+        class _px_no_dialog(_px_app.PxpipeWarningDialog):
+            """Отказ от согласия: галочка должна вернуться в снятое."""
+
+            def exec(self):
+                return 0
+
+        _px_app.PxpipeWarningDialog = _px_no_dialog
+        _px_tab.checks["pxpipe"].setChecked(True)
+        check(not _px_tab.checks["pxpipe"].isChecked(),
+              "отказ в предупреждении возвращает галочку в снятое")
+
+        _px_saved_confirm = _px_tab._px_confirm
+        _px_worker_before = _px_tab._worker
+        _px_tab._px_confirm = lambda: False
+        _px_tab._px_run()
+        check(_px_tab._worker is _px_worker_before,
+              "без согласия кнопка «Запустить pxpipe» ничего не делает")
+        _px_tab._px_confirm = _px_saved_confirm
+        _px_app.PxpipeWarningDialog = _px_saved_dialog
+
+        # Секретов и настоящих путей в новых файлах быть не должно.
+        _px_our_files = (
+            _px_root / "tools" / "dbapp" / "pxpipe.py",
+            _px_readme,
+        )
+        _px_leaks: list[str] = []
+        for _px_item in _px_our_files:
+            _px_body = _px_item.read_text(encoding="utf-8")
+            for _px_mark in ("C:\\Users\\", "/home/", "/Users/", "sk-"):
+                if _px_mark in _px_body:
+                    _px_leaks.append(f"{_px_item}: {_px_mark}")
+        check(not _px_leaks,
+              f"в файлах pxpipe нет секретов и настоящих путей: {_px_leaks}")
+    finally:
+        _px_right_off()
+        _px.find_npx, _px._run, _px.launch_command = _px_saved
+        if _px_saved_port is None:
+            _tk_os.environ.pop("PXPIPE_PORT", None)
+        else:
+            _tk_os.environ["PXPIPE_PORT"] = _px_saved_port
+        shutil.rmtree(_px_tmp, ignore_errors=True)
 
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()

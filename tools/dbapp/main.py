@@ -25,13 +25,14 @@ if __package__ in (None, ""):
     import dbhub  # type: ignore[import-not-found]
     import lmarena  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
+    import pxpipe  # type: ignore[import-not-found]
     import rtk  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
                    browsers, caveman, dbhub, lmarena, omniroute, program_cards,
-                   rtk, winget_install)
+                   pxpipe, rtk, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2630,6 +2631,59 @@ class LmarenaWarningDialog(QDialog):
         box.addLayout(row)
 
 
+class PxpipeWarningDialog(QDialog):
+    """Предупреждение pxpipe — до запуска прокси и до галочки.
+
+    pxpipe переписывает часть запроса картинками, и это сжатие с потерями:
+    по тестам автора часть моделей плохо различает символы, а точные
+    строки, ключи и код — как раз из символов. Галочка по умолчанию снята,
+    а это окно показывается и перед её включением, и перед каждым запуском
+    прокси: согласие должно быть осознанным, а не «я когда-то нажал
+    галочку». Текст держится в pxpipe.WARNING — там же, откуда его берут
+    скилл и самопроверка.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("pxpipe: что важно знать")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "pxpipe — сторонний прокси автора teamchong (лицензия MIT). "
+            "Запросы opencode пойдут через него, и часть запроса он "
+            "превратит в картинки. Включается только по явному согласию "
+            "и по умолчанию выключен. Прочитай, на что идёшь:",
+            wrap=True,
+        ))
+        # Абзацы текста автора свёрнуты в строки: переносы в константе стоят
+        # для читаемости кода, а не для окна — окно переносит само.
+        for _part in pxpipe.WARNING.split("\n\n"):
+            _text = " ".join(line.strip() for line in _part.splitlines()
+                             if line.strip())
+            if _text:
+                box.addWidget(ui.label(_text, wrap=True))
+        box.addWidget(ui.label(
+            "Нажми «Согласен» — и дальше программа сделает ровно то, что "
+            "написано на кнопке. «Отмена» не делает ничего.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Согласен")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+
 class LmarenaTokenDialog(QDialog):
     """Токен арены: вписать свежую куку `arena-auth-prod-v1`.
 
@@ -2726,6 +2780,7 @@ class CapsTab(ScrollPage):
         "antiblock": "Обход блокировок — запуск OpenCode через прокси, пул обновляется сам",
         "rtk": "rtk — вывод команд короче (нужен rtk в PATH)",
         "caveman": "caveman — ответы короче (правила в AGENTS.md)",
+        "pxpipe": "pxpipe — запросы картинками (локальный прокси)",
     }
 
     def __init__(self, parent=None) -> None:
@@ -2778,6 +2833,16 @@ class CapsTab(ScrollPage):
                     "JuliusBrussee (Apache-2.0). Снимается галочкой или "
                     "словами «stop caveman»"
                 )
+            if name == "pxpipe":
+                box.setToolTip(
+                    "Локальный прокси автора teamchong (MIT): часть запроса "
+                    "уезжает нейросети картинкой, и в окно контекста "
+                    "помещается больше. Сжатие с потерями — точные строки и "
+                    "код могут быть прочитаны неверно. Галочка только "
+                    "вписывает запись провайдера: сначала запусти прокси "
+                    "кнопкой ниже, иначе программа ничего не впишет"
+                )
+                box.toggled.connect(self._px_toggled)
             what_layout.addWidget(box)
             self.checks[name] = box
         # Уровень caveman — единственная возможность с выбором внутри
@@ -2795,6 +2860,65 @@ class CapsTab(ScrollPage):
         )
         row_level.addWidget(self.caveman_level, 1)
         what_layout.addLayout(row_level)
+        # --- pxpipe: не только галочка. Прокси — чужая программа, её надо
+        # запустить, остановить и выбрать, к какому провайдеру она
+        # пересылает запросы. Всё это рядом с галочкой: порядок «сначала
+        # прокси, потом галочка» должен быть виден сразу.
+        box_px = QGroupBox("pxpipe — пропускать запросы через локальный прокси")
+        px_layout = QVBoxLayout(box_px)
+        px_layout.addWidget(ui.label(
+            "Прокси запускается отдельной кнопкой и слушает только эту "
+            "машину (127.0.0.1:47821 — адрес из README автора). Галочка "
+            "«pxpipe — запросы картинками» впишет в настройки opencode "
+            "запись провайдера, смотрящую на этот прокси. Работает она "
+            "только при запущенном прокси, поэтому порядок такой: "
+            "сначала «Запустить pxpipe», потом галочка.",
+            kind="dim",
+            wrap=True,
+        ))
+        row_px_src = QHBoxLayout()
+        row_px_src.addWidget(QLabel("Источник для pxpipe:   "))
+        self.pxpipe_source = QComboBox()
+        self.pxpipe_source.setToolTip(
+            "Провайдер opencode, к которому прокси пересылает запросы "
+            "(PXPIPE_UPSTREAM из README автора). Модели берутся у него же: "
+            "своей модели у прокси нет. Список читается из настроек "
+            "opencode, выдумать его нельзя"
+        )
+        row_px_src.addWidget(self.pxpipe_source, 1)
+        px_layout.addLayout(row_px_src)
+        row_px_btns = QHBoxLayout()
+        self.btn_px_run = QPushButton("Запустить pxpipe")
+        self.btn_px_run.setToolTip(
+            "Поднять прокси: программа запустит npx pxpipe-proxy@0.14.0 "
+            "(версия из README автора), дождётся ответа панели и запомнит, "
+            "к какому провайдеру пересылать запросы. В настройки opencode "
+            "ничего не пишет"
+        )
+        self.btn_px_stop = QPushButton("Остановить pxpipe")
+        self.btn_px_stop.setToolTip(
+            "Остановить прокси, запущенный программой. Чужой процесс на "
+            "порту не трогается: без своего файла с номером процесса "
+            "программа только скажет, что прокси не её"
+        )
+        self.btn_px_check = QPushButton("Проверить pxpipe")
+        self.btn_px_check.setToolTip(
+            "Живая проверка: отвечает ли панель прокси на 127.0.0.1:47821 "
+            "и как сейчас выглядит состояние. Ничего не меняет"
+        )
+        self.btn_px_stats = QPushButton("Числа pxpipe")
+        self.btn_px_stats.setToolTip(
+            "Счётчики самого прокси из его журнала: сколько запросов "
+            "превращено в картинки, сколько прошло как есть, сколько "
+            "заняло времени. Числа его собственные, независимо мы их не "
+            "проверяли"
+        )
+        for button in (self.btn_px_run, self.btn_px_stop, self.btn_px_check,
+                       self.btn_px_stats):
+            row_px_btns.addWidget(button)
+        row_px_btns.addStretch(1)
+        px_layout.addLayout(row_px_btns)
+        what_layout.addWidget(box_px)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -3197,6 +3321,10 @@ class CapsTab(ScrollPage):
         self.btn_lm_restart.clicked.connect(self._lm_restart)
         self.btn_lm_status.clicked.connect(self._lm_status)
         self.btn_lm_token.clicked.connect(self._lm_token)
+        self.btn_px_run.clicked.connect(self._px_run)
+        self.btn_px_stop.clicked.connect(self._px_stop)
+        self.btn_px_check.clicked.connect(self._px_check)
+        self.btn_px_stats.clicked.connect(self._px_stats)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -4313,6 +4441,42 @@ class CapsTab(ScrollPage):
             "caveman: сейчас уровень «" + (cword or "лёгкий")
             + "», галочка выберет тот, что стоит в списке."
         )
+        # Строка про pxpipe: без запущенного прокси галочка ничего не
+        # впишет, и сказать об этом надо до нажатия, а не после.
+        try:
+            px = pxpipe.status(dest)
+        except Exception:
+            px = {}
+        if px:
+            where = str(px.get("upstream") or "")
+            if px.get("running"):
+                notes.append(
+                    "pxpipe: прокси отвечает"
+                    + (f" и пересылает запросы к {where}" if where else "")
+                    + ("." if px.get("ours") else " (запущен не программой).")
+                )
+            else:
+                notes.append(
+                    "pxpipe: прокси не отвечает — пока он не запущен, "
+                    "включение ничего не впишет в настройки."
+                )
+        # Список источников для pxpipe: читаем здесь, в главном потоке.
+        try:
+            choices = pxpipe.provider_choices(dest)
+        except Exception:
+            choices = []
+        keep = str(self.pxpipe_source.currentData() or "")
+        self.pxpipe_source.blockSignals(True)
+        self.pxpipe_source.clear()
+        for name in choices:
+            self.pxpipe_source.addItem(name, name)
+        if not choices:
+            self.pxpipe_source.addItem("провайдеров в настройках нет", "")
+        if keep:
+            index = self.pxpipe_source.findData(keep)
+            if index >= 0:
+                self.pxpipe_source.setCurrentIndex(index)
+        self.pxpipe_source.blockSignals(False)
         self.state_hint.setText(self.state_hint.text() + "\n" + "\n".join(notes))
 
     # ---- выбор папки
@@ -4382,9 +4546,10 @@ class CapsTab(ScrollPage):
             self._warn("Ничего не отмечено — отметьте хотя бы одну галочку.")
             return
         base = self._base()
-        # Уровень caveman читаем здесь, в главном потоке: из рабочего потока
-        # трогать виджеты нельзя.
+        # Уровень caveman и источник pxpipe читаем здесь, в главном потоке:
+        # из рабочего потока трогать виджеты нельзя.
         level = str(self.caveman_level.currentData() or "lite")
+        px_source = str(self.pxpipe_source.currentData() or "")
 
         def job(progress):
             m1, e1 = ([], [])
@@ -4394,6 +4559,7 @@ class CapsTab(ScrollPage):
                     base, dest, selection, progress=progress,
                     antiblock_opts=self._antiblock_opts(),
                     caveman_level=level,
+                    pxpipe_provider=px_source,
                 )
             if pselection:
                 # У LMArena блок провайдера собирается из живого моста:
@@ -4437,6 +4603,88 @@ class CapsTab(ScrollPage):
             return rtk.measure()
 
         self._start(job, "measure")
+
+    def _px_confirm(self) -> bool:
+        """Спрашивает согласие на сжатие запросов картинками.
+
+        Галочка снята по умолчанию, поэтому согласие спрашивается и при
+        её включении, и перед каждым запуском прокси: один раз прочитанное
+        предупреждение не должно превращаться в «я когда-то согласился».
+        """
+        dialog = PxpipeWarningDialog(self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _px_toggled(self, on: bool) -> None:
+        """Галочка pxpipe включается только после согласия.
+
+        Выключению согласие не нужно: отказаться должно быть всегда можно.
+        """
+        if not on:
+            return
+        if self._px_confirm():
+            return
+        box = self.checks.get("pxpipe")
+        if box is not None:
+            box.blockSignals(True)
+            box.setChecked(False)
+            box.blockSignals(False)
+        self.log.add("pxpipe остался выключен: согласие не дано.", "warn")
+
+    def _px_dest(self) -> Path | None:
+        """Папка настроек для кнопок pxpipe. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _px_run(self) -> None:
+        """Поднимает прокси pxpipe. В настройки opencode не пишет."""
+        dest = self._px_dest()
+        if dest is None or not self._px_confirm():
+            return
+        source = str(self.pxpipe_source.currentData() or "")
+
+        def job(progress):
+            return pxpipe.start(dest, provider=source, progress=progress)
+
+        self._start(job, "pxpipe")
+
+    def _px_stop(self) -> None:
+        """Останавливает прокси, который запустила программа."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            return pxpipe.stop(dest, progress=progress)
+
+        self._start(job, "pxpipe")
+
+    def _px_check(self) -> None:
+        """Живая проверка прокси: отвечает ли панель. Ничего не меняет."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            ok, note = pxpipe.dashboard_ok()
+            line = ("Живая проверка: " if ok else "Живая проверка не прошла: ") + note
+            if not ok:
+                return [line], [note]
+            return [line, pxpipe.status_text(dest)], []
+
+        self._start(job, "pxpipe")
+
+    def _px_stats(self) -> None:
+        """Числа прокси из его журнала. Ничего не пишет."""
+        dest = self._px_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            return pxpipe.stats(dest, progress=progress)
+
+        self._start(job, "pxpipe")
 
     def _remove(self) -> None:
         dest = self._dest()

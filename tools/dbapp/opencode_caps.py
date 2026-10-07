@@ -40,12 +40,14 @@ CAPS = (
     ("antiblock", "Обход блокировок"),
     ("rtk", "rtk — вывод команд короче"),
     ("caveman", "caveman — ответы короче"),
+    ("pxpipe", "pxpipe — запросы картинками"),
 )
 
 #: Что вкладка «opencode» спрашивает у человека: только расширения.
 #: Мостов здесь нет — они едут с базой и включаются всегда.
-#: rtk и caveman — не MCP-серверы и не мосты: rtk кладёт в настройки
-#: плагин, caveman — правила в AGENTS.md. Оба живут в tools/thirdparty
+#: rtk, caveman и pxpipe — не MCP-серверы и не мосты: rtk кладёт в настройки
+#: плагин, caveman — правила в AGENTS.md, pxpipe — запись провайдера,
+#: смотрящую на локальный прокси. Все трое живут в tools/thirdparty
 #: и в реестр mcp-registry.json не попадают.
 CAPS_CHOICES = (
     ("voice", "Команда /голос"),
@@ -53,12 +55,14 @@ CAPS_CHOICES = (
     ("antiblock", "Обход блокировок"),
     ("rtk", "rtk — вывод команд короче"),
     ("caveman", "caveman — ответы короче"),
+    ("pxpipe", "pxpipe — запросы картинками"),
 )
 
 #: Галочки, которые при открытии вкладки стоят снятыми: у rtk нужен
-#: бинарник в PATH, а caveman меняет стиль ответов — включать их молча,
-#: «по умолчанию», нельзя.
-CAPS_OFF_BY_DEFAULT = ("rtk", "caveman")
+#: бинарник в PATH, caveman меняет стиль ответов, а pxpipe и вовсе
+#: переписывает запрос картинками и без запущенного прокси не работает.
+#: Включать такое молча, «по умолчанию», нельзя.
+CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe")
 
 #: Что подставляется всегда, без галочки: мосты — часть базы, а не опция.
 CAPS_ALWAYS = ("pc", "ncp")
@@ -893,6 +897,7 @@ def install_caps(
     progress=None,
     antiblock_opts: dict[str, bool] | None = None,
     caveman_level: str = "lite",
+    pxpipe_provider: str = "",
 ) -> tuple[list[str], list[str]]:
     """Ставит выбранное в папку настроек opencode. Возвращает (сообщения, ошибки).
 
@@ -901,6 +906,10 @@ def install_caps(
 
     caveman_level — «лёгкий» (lite) или «полный» (full) уровень правил
     caveman. Уровня у остальных возможностей нет, поэтому он один на вызов.
+
+    pxpipe_provider — имя провайдера opencode, к которому pxpipe пересылает
+    запросы и у которого берёт модели. Без живого прокси pxpipe ничего не
+    впишет: запись без прокси всё равно не заработает.
     """
     messages: list[str] = []
     errors: list[str] = []
@@ -1020,6 +1029,13 @@ def install_caps(
         messages += m_cav
         errors += e_cav
 
+    # --- pxpipe: свой модуль. Он сам проверяет, что прокси жив и запущен
+    # программой именно под выбранный источник, и иначе ничего не пишет.
+    if "pxpipe" in selection:
+        m_px, e_px = _pxpipe_module().install(dest, pxpipe_provider, progress=progress)
+        messages += m_px
+        errors += e_px
+
     if (
         "pc" in selection
         or "ncp" in selection
@@ -1028,6 +1044,7 @@ def install_caps(
         or "antiblock" in selection
         or "rtk" in selection
         or "caveman" in selection
+        or "pxpipe" in selection
     ):
         say("Перезапустите opencode: настройки читаются при старте.")
     return messages, errors
@@ -1045,6 +1062,13 @@ def _caveman_module():
     import caveman  # noqa: PLC0415 — рядом лежит, круга нет
 
     return caveman
+
+
+def _pxpipe_module():
+    """Модуль pxpipe рядом."""
+    import pxpipe  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return pxpipe
 
 
 def place_file(
@@ -1152,6 +1176,13 @@ def remove_caps(
         messages += m_cav
         errors += e_cav
 
+    # --- pxpipe: убирается только наша запись провайдера. Сам прокси это
+    # не останавливает: его гасят кнопкой «Остановить pxpipe».
+    if "pxpipe" in selection:
+        m_px, e_px = _pxpipe_module().remove(dest, progress=progress)
+        messages += m_px
+        errors += e_px
+
     # --- обход блокировок: убирает свой модуль сам, в запас, не в корзину.
     if "antiblock" in selection:
         try:
@@ -1207,6 +1238,10 @@ def caps_status(dest: Path) -> dict[str, bool]:
         pass
     try:
         status["caveman"] = bool(_caveman_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["pxpipe"] = bool(_pxpipe_module().status(dest).get("installed"))
     except Exception:
         pass
     _ = manifest
