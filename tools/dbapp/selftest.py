@@ -691,15 +691,31 @@ def main() -> int:
                 check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
             check("dbhub" in window.caps_tab.AUTO_SERVERS,
                   "DBHub умеет «Настроить автоматически»")
+            # Кнопки браузеров стоят в том же ряду: выбирать браузер и
+            # проверять его больше негде.
+            for _name in ("btn_br_choose", "btn_br_check"):
+                check(hasattr(window.caps_tab, _name), f"кнопка {_name} собрана")
+            check("browsers" in window.caps_tab.AUTO_SERVERS,
+                  "Браузеры умеют «Настроить автоматически»")
             _states = [
                 _reg_tab.item(r, 1).text() if _reg_tab.item(r, 1) else ""
                 for r in range(_reg_tab.rowCount())
             ]
             check(all(_states), "у всех строк заполнено состояние")
-            check(
-                all("не проверено" in s for s in _states),
-                f"до проверки состояние честное, а не выдуманное: {_states}",
-            )
+            # До проверки строка обязана отвечать честно: либо
+            # «не проверено», либо прямо, чего не хватает. Строка браузеров
+            # до первого выбора говорит «нужно: выбрать браузер» — до выбора
+            # проверять нечего, и это тот же честный ответ. А вот обещать
+            # готовность до живой проверки нельзя: «включён» и «можно
+            # включить» появляются только после прогона требований.
+            _honest = ("не проверено", "нужно:", "не хватает:", "нет команды")
+            _lied = [s for s in _states if not any(h in s for h in _honest)]
+            check(not _lied,
+                  f"до проверки состояние честное, а не выдуманное: {_lied}")
+            _claimed = [s for s in _states
+                        if "включён" in s or "можно включить" in s]
+            check(not _claimed,
+                  f"и ни одна строка не обещает готовность до проверки: {_claimed}")
         # инструкция про серверы подключена
         check("инструкции/МCP-серверы.md" in core.INSTRUCTION_TARGETS,
               "инструкция про MCP-серверы подключена к каждой сессии")
@@ -4441,6 +4457,250 @@ def main() -> int:
         finally:
             shutil.rmtree(_db_tmp, ignore_errors=True)
 
+    # ---- Мост браузеров: страницы в настоящем браузере через Playwright MCP
+    #
+    # Пакета моста в репозитории нет: его скачивает npx. Проверяем то, чем
+    # он управляется: лаунчер, запись в реестре, файл выбора и живую
+    # проверку против поддельного сервера протокола MCP. Поддельный сервер
+    # нужен, чтобы проверить «страница открылась, заголовок прочитан» без
+    # настоящего браузера: ставить браузер в самопроверку нельзя, это
+    # десятки мегабайт и чужое решение.
+    import browsers as _br  # noqa: PLC0415 — рядом лежит, круга нет
+    _br_launcher = (_root / "tools" / "dbapp" / "launchers"
+                    / "browsers_bridge_launcher.py")
+    check(_br_launcher.is_file(), "лаунчер моста браузеров на месте")
+    if _br_launcher.is_file():
+        _br_src = _br_launcher.read_text(encoding="utf-8")
+        check("file=sys.stderr" in _br_src,
+              "лаунчер браузеров пишет журнал в stderr, а не в stdout")
+        check("browsers.command(" in _br_src,
+              "лаунчер браузеров берёт команду из общего модуля, а не свою")
+        check("def main() -> int" in _br_src and "__main__" in _br_src,
+              "лаунчер браузеров запускается сам: main() и __main__")
+        check("PyQt6" not in _br_src and "from PyQt" not in _br_src,
+              "лаунчер браузеров не тянет окно программы")
+
+    _br_srv = next((s for s in _mcp_registry.load_servers(_root)
+                    if s.id == "browsers"), None)
+    check(_br_srv is not None, "сервер browsers есть в реестре программы")
+    if _br_srv is not None:
+        _br_conn = _br_srv.raw.get("connection") or {}
+        _br_cmd = [str(part) for part in _br_conn.get("command") or []]
+        check(_br_conn.get("kind") == "local"
+              and "{DBAPP_PYTHON}" in _br_cmd
+              and any("browsers_bridge_launcher.py" in part for part in _br_cmd),
+              "команда browsers — плейсхолдеры и лаунчер, настоящих путей нет")
+        check(not [part for part in _br_cmd
+                   if re.search(r"[A-Za-z]:[\\/]|^/|^\\\\", part)],
+              f"в команде browsers нет настоящих путей: {_br_cmd}")
+        check(_br_conn.get("warm_up") is True,
+              "у browsers прогрев кэша включён: npx скачивает пакет заранее")
+        check(any(r.value == "node" and r.min_version == 18
+                  for r in _br_srv.requirements),
+              "у browsers порог Node.js 18 — из engines пакета")
+        _br_node = next((i for i in _mcp_registry.load_registry(_root)
+                         .get("bridge_requirements", {}).get("items", [])
+                         if i.get("program") == "Node.js"), {})
+        check("browsers" in (_br_node.get("required_by") or []),
+              "browsers записан в «нужно мостам» у Node.js")
+
+        _br_tmp = Path(tempfile.mkdtemp(prefix="browsers-selftest-"))
+        try:
+            # Аргументы: у каждого браузера свои. Путь вместо канала — только
+            # там, где канала нет, а профиль всегда наш, а не личный.
+            _br_args = _br.browser_args(_br_tmp, _br.Choice(browser="chrome"))
+            check("--browser chrome" in " ".join(_br_args)
+                  and "--user-data-dir" in " ".join(_br_args),
+                  f"chrome идёт каналом и со своим профилем: {_br_args}")
+            check(str(_br.profile_dir(_br_tmp, "chrome")) in " ".join(_br_args),
+                  "профиль нейросети лежит в cache/browsers, а не в личном")
+            _br_yandex = _br.browser_args(
+                _br_tmp, _br.Choice(browser="yandex", executable=str(_br_launcher)))
+            check("--executable-path" in " ".join(_br_yandex)
+                  and "--browser" not in " ".join(_br_yandex),
+                  "яндекс-браузер идёт по пути: канала у Playwright для него нет")
+            check(_br.browser_args(
+                      _br_tmp, _br.Choice(browser="chrome", profile="sessions"))
+                  == ["--extension"],
+                  "режим «мои сессии» — только --extension, без профиля и окна")
+            check("--isolated" in _br.browser_args(
+                      _br_tmp, _br.Choice(browser="firefox", profile="isolated")),
+                  "режим без сохранения — --isolated")
+            check("--headless" in _br.browser_args(
+                      _br_tmp, _br.Choice(headless=True)),
+                  "выбор «без окна» доходит до сервера")
+
+            # Файл выбора: пишется, читается, а неверное — отклоняется.
+            _br_m1, _br_e1 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="yandex", executable="/нет/browser.exe"))
+            check(bool(_br_e1) and not _br.config_path(_br_tmp).is_file(),
+                  f"яндекс без пути отклонён: {_br_e1[:1]}")
+            _br_m2, _br_e2 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="firefox", profile="sessions"))
+            check(bool(_br_e2),
+                  f"«мои сессии» не для firefox отклонены: {_br_e2[:1]}")
+            _br_m3, _br_e3 = _br.write_choice(
+                _br_tmp, _br.Choice(browser="chrome", profile="separate"))
+            check(not _br_e3 and _br.config_path(_br_tmp).is_file(),
+                  f"выбор записан: {_br_e3}")
+            check(_br.read_choice(_br_tmp).browser == "chrome",
+                  "выбор читается обратно")
+
+            # Живая проверка: поддельный сервер отвечает как настоящий
+            # Playwright MCP. Открывать настоящий браузер для этого не нужно.
+            _br_fake_lines = [
+                "import json, sys",
+                "TOOLS = [",
+                "    {'name': 'browser_navigate'}, {'name': 'browser_evaluate'},",
+                "    {'name': 'browser_take_screenshot'}]",
+                "def answer_for(message):",
+                "    params = message.get('params') or {}",
+                "    name = params.get('name')",
+                "    args = params.get('arguments') or {}",
+                "    if name == 'browser_navigate':",
+                "        return {'content': [{'type': 'text', 'text': '### Page'}]}",
+                "    if name == 'browser_evaluate':",
+                "        return {'content': [{'type': 'text',",
+                "                             'text': 'Мост браузеров: проверка'}]}",
+                "    if name == 'browser_take_screenshot':",
+                "        path = str(args.get('filename') or '')",
+                "        if path:",
+                "            with open(path, 'wb') as fh:",
+                "                fh.write(b'PNG')",
+                "        return {'content': [{'type': 'text', 'text': 'saved'}]}",
+                "    return {'isError': True,",
+                "            'content': [{'type': 'text', 'text': 'нет такого инструмента'}]}",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'Playwright', 'version': '9.9.9'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': TOOLS}",
+                "    elif method == 'tools/call':",
+                "        answer = answer_for(message)",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _br_fake_text = chr(10).join(_br_fake_lines) + chr(10)
+            _br_fake = _br_tmp / "подделка_playwright.py"
+            _br_fake.write_text(_br_fake_text, encoding="utf-8")
+            _br_ok, _br_note = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_fake)])
+            check(_br_ok, f"живая проверка разговаривает с сервером: {_br_note}")
+            check("инструментов 3" in _br_note,
+                  f"и видит инструменты сервера: {_br_note}")
+            check("страница открыта" in _br_note
+                  and "заголовок прочитан" in _br_note,
+                  f"и открывает страницу, читает заголовок: {_br_note}")
+            check("снимок:" in _br_note and "снимок не вышел" not in _br_note,
+                  f"и снимает снимок файлом: {_br_note}")
+            check((_br.profile_dir(_br_tmp, "chrome").parent / "check.png").is_file(),
+                  "снимок экрана лёг файлом рядом с профилем")
+
+            # Тот же протокол, другое имя сервера: чужой мост за Playwright
+            # выдавать нельзя, и проверка обязана это заметить.
+            _br_other = _br_tmp / "подделка_чужая.py"
+            _br_other.write_text(
+                _br_fake_text.replace("'Playwright', 'version'",
+                                      "'Совсем Другой Сервер', 'version'"),
+                encoding="utf-8")
+            _br_ok2, _br_note2 = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_other)])
+            check(not _br_ok2 and "Playwright" in _br_note2,
+                  f"чужой сервер не выдаётся за Playwright: {_br_note2}")
+
+            # Браузер есть, а страница не открылась — это отказ, и в нём
+            # должны быть слова сервера, а не «не получилось».
+            _br_bad = _br_tmp / "подделка_отказ.py"
+            _br_bad_lines = [
+                "import json, sys",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    message = json.loads(line)",
+                "    method = message.get('method')",
+                "    if method == 'initialize':",
+                "        answer = {'serverInfo': {'name': 'Playwright'}}",
+                "    elif method == 'tools/list':",
+                "        answer = {'tools': [{'name': 'browser_navigate'}]}",
+                "    elif method == 'tools/call':",
+                "        note = 'Chromium distribution chrome is not found'",
+                "        answer = {'isError': True,",
+                "                  'content': [{'type': 'text', 'text': note}]}",
+                "    else:",
+                "        continue",
+                "    sys.stdout.write(json.dumps(",
+                "        {'jsonrpc': '2.0', 'id': message['id'], 'result': answer})",
+                "        + chr(10))",
+                "    sys.stdout.flush()",
+            ]
+            _br_bad.write_text(chr(10).join(_br_bad_lines) + chr(10),
+                               encoding="utf-8")
+            _br_ok3, _br_note3 = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_bad)])
+            check(not _br_ok3 and "Chromium distribution" in _br_note3,
+                  f"незапустившийся браузер — отказ со словами сервера: {_br_note3}")
+            check("установлен" in _br_note3,
+                  f"и подсказка, что делать: {_br_note3}")
+            _br_ok3, _br_note3 = _br.probe(
+                _br_tmp, timeout=30, command=[sys.executable, str(_br_bad)])
+            check(not _br_ok3 and "not found" in _br_note3,
+                  f"незапустившийся браузер — отказ со словами сервера: {_br_note3}")
+
+            # Автонастройка без выбора ничего не пишет: у Яндекса без пути
+            # проверять нечего, и в настройки opencode не попадает ничего.
+            # Файл выбора правится и руками, поэтому состояние «Яндекс без
+            # пути» пишем напрямую: через окно такое не записать.
+            _br_empty = _br_tmp / "пустая-папка"
+            _br_empty.mkdir()
+            (_br_empty / _br.CONFIG_NAME).write_text(
+                json.dumps({"browser": "yandex", "executable": ""},
+                           ensure_ascii=False), encoding="utf-8")
+            _br_m5, _br_e5 = _br.auto_setup(_br_empty, _br_srv)
+            check(bool(_br_e5),
+                  f"автонастройка без выбора отказывает: {_br_e5[:1]}")
+            check(not (_br_empty / "opencode.jsonc").exists(),
+                  "и в настройки opencode ничего не вписано")
+
+            # Повторное «Включить» не переписывает файл настроек.
+            _br_dest = _br_tmp / "настройки"
+            _br_dest.mkdir()
+            (_br_dest / "opencode.jsonc").write_text(
+                '{\n  "mcp": {}\n}\n', encoding="utf-8")
+            _br.write_choice(_br_dest, _br.Choice(browser="chrome"))
+            _br_clone = copy.copy(_br_srv)
+            _br_clone.raw = dict(_br_srv.raw)
+            # Прогрев в проверке выключен намеренно: он запускает npx и
+            # скачивал бы пакет при каждом прогоне самопроверки.
+            _br_clone.raw["connection"] = dict(_br_srv.raw.get("connection") or {},
+                                               warm_up=False)
+            _br_clone.requirements = []
+            _br_clone.has_connection = True
+            _br_a1, _br_ae1 = _mcp_registry.enable(_br_dest, _br_clone)
+            _br_c1 = (_br_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            _br_a2, _br_ae2 = _mcp_registry.enable(_br_dest, _br_clone)
+            _br_c2 = (_br_dest / "opencode.jsonc").read_text(encoding="utf-8")
+            check(not _br_ae1 and '"browsers"' in _br_c1,
+                  f"включение browsers пишет блок в настройки: {_br_ae1}")
+            check("browsers_bridge_launcher.py" in _br_c1
+                  and "{PROGRAM}" not in _br_c1,
+                  "в настройки вписан настоящий путь к лаунчеру")
+            check(_br_c1 == _br_c2 and _br_c2.count('"browsers"') == 1,
+                  "повторное включение browsers не меняет файл настройки")
+            check(any("не трогаю" in m for m in _br_a2),
+                  "и программа говорит, что файл не тронула")
+        finally:
+            shutil.rmtree(_br_tmp, ignore_errors=True)
+
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
     check(isinstance(_on, bool) and _port > 0,
@@ -5541,9 +5801,9 @@ def main() -> int:
     # --- настоящий реестр
     _base = core.program_root()
     _servers = mcp_registry.load_servers(_base)
-    check(len(_servers) == 9, f"реестр читается, 9 серверов: {len(_servers)}")
+    check(len(_servers) == 10, f"реестр читается, 10 серверов: {len(_servers)}")
     check(all(s.program_install is not None for s in _servers),
-          "у всех 9 серверов есть блок program_install")
+          "у всех 10 серверов есть блок program_install")
     _by_id = {s.id: s.program_install for s in _servers}
     if all(_by_id.values()):
         check(_by_id["blender"].winget_id == "BlenderFoundation.Blender"
@@ -5626,13 +5886,13 @@ def main() -> int:
         check(any("серверов 0" in b for b in _bad2),
               f"и называет причину — ноль серверов: {(_bad2 or [''])[0][:70]}")
 
-        # Все девять на месте, и у каждого четыре ответа.
+        # Все десять на месте, и у каждого четыре ответа.
         _views = pmod.server_views(_base)
-        check(len(_views) == 9, f"движок прочитал все девять серверов: {len(_views)}")
+        check(len(_views) == 10, f"движок прочитал все десять серверов: {len(_views)}")
         _by = {v.id: v for v in _views}
         for _sid in ("windows-admin", "excel", "blender", "adobe-creativity",
                      "android-studio", "obs", "android-emulator", "ldplayer",
-                     "dbhub"):
+                     "dbhub", "browsers"):
             check(_sid in _by, f"сервер {_sid} есть в движке")
 
         # Порог версии сравнивается, а не просто запоминается. Пример DBHub
@@ -5657,6 +5917,24 @@ def main() -> int:
              if r.value == "node"), None)
         check(_node_in_dbhub is not None and _node_in_dbhub.min_version == 22,
               "у dbhub порог Node.js 22 — из engines пакета, а не обещание 18+")
+        # Тот же Node.js, но пороги у серверов разные: dbhub просит 22, а
+        # браузерам хватает 18 — строка engines в пакете @playwright/mcp.
+        # Один и тот же Node 20 обязан быть достаточным для одних и
+        # недостаточным для другого: иначе порог в реестре — украшение.
+        _br_srv_req = next((s for s in _servers if s.id == "browsers"), None)
+        _node_in_br = next(
+            (r for r in (_br_srv_req.requirements if _br_srv_req else [])
+             if r.value == "node"), None)
+        check(_node_in_br is not None and _node_in_br.min_version == 18,
+              "у browsers порог Node.js 18 — из engines пакета @playwright/mcp")
+        _req20 = {"type": "command", "check": sys.executable,
+                  "args": ["-c", "print('20.11.0')"]}
+        _db20 = _mcp_registry.check_requirement(
+            dict(_req20, what="dbhub", min_version=22))
+        _br20 = _mcp_registry.check_requirement(
+            dict(_req20, what="browsers", min_version=18))
+        check(_db20.ok is False and _br20.ok is True,
+              "Node 20 не годится dbhub и годится браузерам — пороги разные")
 
         # Кнопка там, где ставить реально можно.
         check(_by["windows-admin"].install.has_button
@@ -5703,8 +5981,8 @@ def main() -> int:
         _needs = pmod.bridge_needs(_base)
         check(len(_needs) == 2, f"в разделе «нужно мостам» два предмета: {len(_needs)}")
         _nn = {n.program: n for n in _needs}
-        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 4,
-              "Node.js требуют четверо серверов из девяти")
+        check("Node.js" in _nn and _nn["Node.js"].wanted_by_count == 5,
+              "Node.js требуют пятеро серверов из десяти")
         check(_nn.get("Node.js") is not None
               and _nn["Node.js"].install.winget_id == "OpenJS.NodeJS.LTS",
               "у Node.js настоящий идентификатор winget")
@@ -5949,7 +6227,7 @@ def main() -> int:
     if pcard is not None and wmod is not None:
         _pbase = core.program_root()
         _cards = pcard.cards(_pbase)
-        check(len(_cards) >= 9, f"карточек не меньше девяти: {len(_cards)}")
+        check(len(_cards) >= 10, f"карточек не меньше десяти: {len(_cards)}")
         check(pcard.section_problem(_pbase) == "",
               f"данные для карточек целы: {pcard.section_problem(_pbase)[:60]}")
 
@@ -5958,8 +6236,9 @@ def main() -> int:
         _node = _by_name.get("Node.js")
         check(_node is not None, "Node.js — карточка есть")
         _node_servers = set(_node.servers) if _node else set()
-        check(_node_servers == {"windows-admin", "excel", "obs", "dbhub"},
-              f"Node.js одной карточкой на четверых серверов: {sorted(_node_servers)}")
+        check(_node_servers == {"windows-admin", "excel", "obs", "dbhub",
+                               "browsers"},
+              f"Node.js одной карточкой на пятерых серверов: {sorted(_node_servers)}")
         check(sum(1 for c in _cards if c.name == "Node.js") == 1,
               "и не двумя карточками, как он описан в реестре")
         check("нужна:" in pcard.needed_by_text(_node, pcard.servers_by_name(_pbase)),
