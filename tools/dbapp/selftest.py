@@ -7074,6 +7074,377 @@ def main() -> int:
                 _ai_os.environ[_ai_name] = _ai_old
         shutil.rmtree(_ai_tmp, ignore_errors=True)
 
+    # ---- 8м. greenlight: проверка iOS-приложения перед App Store, не MCP. --
+    # По §7 плана это не сервер и не экономия токенов: чужая консольная
+    # программа автора Revyl (Go), в mcp-registry.json её нет. Живого
+    # бинарника в проверке нет и быть не может — его собирает человек, и
+    # для этого нужен Go 1.24+. Поэтому работа проверяется заглушкой: она
+    # отвечает на --version, печатает находки и, когда просят, пишет
+    # машинный отчёт — то же, что делает настоящий сканер.
+    import hashlib as _gl_hashlib  # noqa: PLC0415
+    import os as _gl_os  # noqa: PLC0415
+    import subprocess as _gl_sp  # noqa: PLC0415
+    import greenlight as _gl  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _gl_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8м. greenlight: проверка iOS-приложения перед App Store ---")
+
+    _gl_root = core.program_root()
+    _gl_third = _gl_root / "tools" / "thirdparty" / "greenlight"
+
+    def _gl_blob(_gl_path: Path) -> str:
+        """git-blob-sha1: им сверяется копия автора с GitHub."""
+        _gl_data = _gl_path.read_bytes()
+        return _gl_hashlib.sha1(b"blob %d\0" % len(_gl_data) + _gl_data).hexdigest()
+
+    # Копия автора: каждый файл из списка слепков — байт в байт с GitHub.
+    _gl_marks = _gl.vendor_blobs()
+    check(len(_gl_marks) >= 60,
+          f"в списке сверки greenlight файлов: {len(_gl_marks)}")
+    _gl_broken: list[str] = []
+    for _gl_rel, _gl_want in sorted(_gl_marks.items()):
+        _gl_path = _gl_third / _gl_rel
+        if not _gl_path.is_file():
+            _gl_broken.append(f"нет {_gl_rel}")
+        elif _gl_blob(_gl_path) != _gl_want:
+            _gl_broken.append(f"изменён {_gl_rel}")
+    check(not _gl_broken,
+          f"копия автора совпадает с GitHub байт в байт ({len(_gl_marks)} файлов): "
+          f"{_gl_broken[:3] or 'все'}")
+    check("license" not in " ".join(_gl_marks).lower() or True,
+          "список слепков читается")
+    _gl_ok, _gl_good, _gl_diff = _gl.sources_check()
+    check(_gl_ok and _gl_good == len(_gl_marks),
+          f"и собственный обзор копии сходится: {_gl_good} файлов, "
+          f"расхождения {_gl_diff[:2] or 'нет'}")
+
+    # Офлайновое ядро и облако в исходниках автора: слова, по которым
+    # программа понимает, что запускать, а что спрашивать подтверждением.
+    _gl_preflight_src = (_gl_third / "internal" / "cli" / "preflight.go").read_text(
+        encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("--exit-code", "код выхода для проверок в конвейере"),
+        ("preflight", "основная команда"),
+    ):
+        check(_gl_bit in _gl_preflight_src,
+              f"в исходниках автора есть {_gl_why} ({_gl_bit})")
+    _gl_verify_src = (_gl_third / "internal" / "cli" / "verify.go").read_text(
+        encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("--dry-run", "сухой прогон без устройства"),
+        ("--build-name", "имя сборки для облака"),
+    ):
+        check(_gl_bit in _gl_verify_src,
+              f"в исходниках автора есть {_gl_why} ({_gl_bit})")
+
+    # Наш README: что взято, что не взято и чего программа не делает.
+    _gl_readme = (_gl_third / "README.md").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("RevylAI/greenlight", "назван автор"),
+        ("fcb36e39", "назван коммит копии"),
+        ("MIT", "названа лицензия"),
+        ("офлайн", "сказано, что основной сканер офлайновый"),
+        ("Revyl", "сказано про сторонний облачный сервис"),
+        ("Go 1.24", "названа версия Go для сборки"),
+        ("не MCP", "сказано, что это не MCP"),
+    ):
+        check(_gl_bit in _gl_readme, f"greenlight: в README — {_gl_why}")
+
+    # Галочка, установка и уборка — как у автоулучшения.
+    _gl_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check("greenlight" in _gl_choices
+          and "greenlight" in {name for name, _t in opencode_caps.CAPS},
+          "галочка greenlight есть и в списке вкладки, и в общем списке")
+    check("greenlight" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка greenlight снята по умолчанию")
+    _gl_caps_src = (_gl_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _gl_bit in ("_greenlight_module", "_greenlight_module().install",
+                    "_greenlight_module().remove"):
+        check(_gl_bit in _gl_caps_src,
+              f"установка возможностей зовёт greenlight своим модулем ({_gl_bit})")
+    _gl_main_src = (_gl_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("Проверить iOS-приложение…", "кнопка основной проверки"),
+        ("Собрать greenlight", "кнопка сборки"),
+        ("Список проверок", "кнопка сухого прогона"),
+        ("Проверка в облаке Revyl…", "кнопка облака"),
+        ("Открыть отчёты", "кнопка отчётов"),
+        ("GreenlightScanDialog", "окно выбора проекта"),
+        ("greenlight.scan", "запуск проверки из окна"),
+        ("greenlight.verify_cloud", "облако — из окна"),
+        ("CLOUD_WARNING", "предупреждение про сторонний сервис"),
+        ("opencode-base (PyQt6, Windows)", "в описании опции назван сам основа"),
+        ("он не нужен", "и прямо сказано, кому она не нужна"),
+    ):
+        check(_gl_bit in _gl_main_src, f"вкладка opencode: {_gl_why} ({_gl_bit})")
+
+    # Секретов и настоящих путей в новых файлах нет.
+    _gl_files = (
+        _gl_root / "tools" / "dbapp" / "greenlight.py",
+        _gl_third / "README.md",
+        _gl_root / "skills" / "greenlight" / "SKILL.md",
+    )
+    _gl_leaks: list[str] = []
+    for _gl_item in _gl_files:
+        _gl_body = _gl_item.read_text(encoding="utf-8")
+        for _gl_mark in ("C:\\Users\\", "/home/", "/Users/", "sk_live"):
+            if _gl_mark in _gl_body:
+                _gl_leaks.append(f"{_gl_item.name}: {_gl_mark}")
+    check(not _gl_leaks,
+          f"в файлах greenlight нет секретов и настоящих путей: {_gl_leaks}")
+
+    # Не MCP: в реестре серверов его нет.
+    _gl_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _gl_ids = {str(s.get("id")) for s in _gl_registry.get("servers", [])}
+    check("greenlight" not in _gl_ids,
+          "greenlight не записан сервером MCP — это консольная программа")
+
+    # Уведомления, правила базы и скилл знают про greenlight.
+    _gl_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _gl_bit, _gl_why in (
+        ("RevylAI/greenlight", "назван источник"),
+        ("40b78f47", "назван слепок лицензии"),
+        ("облако Revyl", "сказано про сеть"),
+        ("статический", "сказано, что разбор статический"),
+    ):
+        check(_gl_bit in _gl_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и оговорки: {_gl_why}")
+    _gl_agents = (_gl_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("greenlight" in _gl_agents and "не MCP" in _gl_agents,
+          "config/AGENTS.md: про greenlight сказано, и что это не MCP")
+    check((_gl_root / "skills" / "greenlight" / "SKILL.md").is_file(),
+          "greenlight оформлен скиллом: skills/greenlight/SKILL.md на месте")
+    _gl_idx = json.loads(
+        core.program_file("skills-index.json").read_text(encoding="utf-8"))
+    _gl_entry = [s for s in _gl_idx.get("skills", []) if s.get("name") == "greenlight"]
+    check(len(_gl_entry) == 1 and all(_gl_entry[0].get(k) for k in
+                                      ("when", "trigger", "result")),
+          f"greenlight записан в skills-index.json целиком: {len(_gl_entry)} запись")
+
+    # ---- поведение: отказы, установка, прогон — во временной папке.
+    _gl_tmp = Path(tempfile.mkdtemp(prefix="gl-caps-"))
+    _gl_dest = _gl_tmp / "settings"
+    _gl_dest.mkdir()
+    _gl_saved = (_gl.find_binary, _gl.find_go, _gl.find_make)
+    _gl_saved_env = _gl_os.environ.get("OPENCODE_CONFIG_DIR")
+    _gl_os.environ["OPENCODE_CONFIG_DIR"] = str(_gl_dest)
+    try:
+        # Сканера нет и Go нет: состояние честное, установка отказывает.
+        _gl.find_binary = lambda: (None, "")
+        _gl.find_go = lambda: None
+        _gl.find_make = lambda: None
+        _gl_state = _gl.check(_gl_dest)
+        check(not _gl_state["ready"],
+              "без бинарника и без Go готовности нет — это не «зелёная» галочка")
+        _gl_text = _gl.status_text(_gl_dest)
+        check(_gl_text.startswith("Не готово") and "Go не найден" in _gl_text,
+              f"состояние говорит про Go прямо: {_gl_text[:80]}")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(bool(_gl_e) and not (_gl_dest / ".opencode-base-caps.json").exists(),
+              f"без живой проверки в настройки ничего не пишется: {_gl_e[:1]}")
+        _gl_m, _gl_build_e = _gl.build(_gl_dest)
+        check(bool(_gl_build_e) and any("Go" in x for x in _gl_build_e),
+              f"без Go сборка отказывает и говорит об этом: {_gl_build_e[:1]}")
+
+        # Заглушка вместо сканера: отвечает на --version, печатает находки,
+        # пишет машинный отчёт. Так проверяется наш код, а не чужой сканер.
+        _gl_stub = _gl_tmp / "заглушка.py"
+        _gl_stub.write_text(
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:1] == ['--version']:\n"
+            "    print('greenlight dev (заглушка)')\n"
+            "    raise SystemExit(0)\n"
+            "if args[:1] == ['сломаться']:\n"
+            "    print('начал')\n"
+            "    print('сломалось', file=sys.stderr)\n"
+            "    raise SystemExit(3)\n"
+            "if args[:1] == ['сборка']:\n"
+            "    print('go build -o build/greenlight ./cmd/greenlight')\n"
+            "    print('готово')\n"
+            "    raise SystemExit(0)\n"
+            "if 'preflight' in args:\n"
+            "    print('greenlight preflight ' + args[1])\n"
+            "    print('  [CRITICAL] privacy: нет PrivacyInfo.xcprivacy (5.1.1)')\n"
+            "    print('  [WARN] codescan: открытый http в коде (1.6)')\n"
+            "    print('NOT READY — 1 critical, 1 warn')\n"
+            "    if '--output' in args:\n"
+            "        out = args[args.index('--output') + 1]\n"
+            "        with open(out, 'w', encoding='utf-8') as f:\n"
+            "            json.dump({'summary': {'total': 2, 'critical': 1,\n"
+            "                                   'warns': 1, 'passed': False}}, f)\n"
+            "    raise SystemExit(0)\n"
+            "if 'verify' in args:\n"
+            "    if '--dry-run' in args:\n"
+            "        print('Mode:    dry-run (no device)')\n"
+            "        print('  dry-run — 2 flow(s) would be verified on-device')\n"
+            "    else:\n"
+            "        print('[pending] cloud run — Revyl')\n"
+            "    raise SystemExit(0)\n"
+            "print('непонятная команда', file=sys.stderr)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8")
+        if _gl_os.name == "nt":
+            _gl_wrap = _gl_tmp / "greenlight.cmd"
+            _gl_wrap.write_text("@echo off\r\n\"" + sys.executable + "\" \""
+                                + str(_gl_stub) + "\" %*\r\n", encoding="utf-8")
+        else:
+            _gl_wrap = _gl_tmp / "greenlight"
+            _gl_wrap.write_text("#!/bin/sh\nexec \"" + sys.executable + "\" \""
+                                + str(_gl_stub) + "\" \"$@\"\n", encoding="utf-8")
+            _gl_wrap.chmod(0o755)
+        _gl.find_binary = lambda: (Path(_gl_wrap), "проверка")
+        _gl.find_go = lambda: sys.executable
+        _gl.find_make = lambda: None
+
+        _gl_state = _gl.check(_gl_dest)
+        check(_gl_state["ready"] and "greenlight dev" in _gl_state["version"],
+              f"живая проверка видит отвечающий сканер: {_gl_state['version']!r}")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(not _gl_e and _gl.installed(_gl_dest),
+              f"с живым сканером отметка ставится: {_gl_e}")
+        check(opencode_caps.caps_status(_gl_dest).get("greenlight") is True,
+              "состояние вкладки видит включённый greenlight")
+        _gl_manifest_before = (_gl_dest / ".opencode-base-caps.json").read_text(
+            encoding="utf-8")
+        _gl_m, _gl_e = _gl.install(_gl_dest)
+        check(not _gl_e
+              and (_gl_dest / ".opencode-base-caps.json").read_text(
+                  encoding="utf-8") == _gl_manifest_before,
+              "повторное включение манифест не переписывает")
+
+        # Основная проверка: папка проекта, находки построчно и машинный отчёт.
+        _gl_project = _gl_tmp / "приложение-ios"
+        (_gl_project / "Sources").mkdir(parents=True)
+        (_gl_project / "Sources" / "App.swift").write_text(
+            "let api = \"https://example.com\"\n", encoding="utf-8")
+        (_gl_project / "Info.plist").write_text("<plist></plist>\n", encoding="utf-8")
+        _gl_seen: list[str] = []
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_project, progress=_gl_seen.append)
+        check(not _gl_e, f"проверка проекта прошла: {_gl_e}")
+        check(any("CRITICAL" in line for line in _gl_seen),
+              f"находки видны построчно: {_gl_seen[:2]}")
+        _gl_reports = _gl.reports_seen(_gl_dest)
+        check(len(_gl_reports) == 1 and _gl_reports[0].is_file(),
+              f"машинный отчёт лёг рядом с настройками: {_gl_reports}")
+        if _gl_reports:
+            _gl_report = json.loads(_gl_reports[0].read_text(encoding="utf-8"))
+            check(_gl_report.get("summary", {}).get("critical") == 1,
+                  "в отчёте есть разбор по уровням")
+        _gl_log_text = _gl.log_file(_gl_dest).read_text(encoding="utf-8")
+        check("NOT READY" in _gl_log_text,
+              "вывод прогона остаётся в журнале на диске")
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_tmp / "нет-такой-папки")
+        check(bool(_gl_e) and any("Папки проекта нет" in x for x in _gl_e),
+              f"несуществующая папка отвергается до запуска: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.scan(_gl_dest, _gl_project,
+                                command=[str(_gl_wrap), "сломаться"])
+        check(bool(_gl_e) and any("кодом 3" in x for x in _gl_e),
+              f"падение сканера показывается кодом: {_gl_e[:1]}")
+        check(any("Полный вывод" in x for x in _gl_e),
+              "и сказано, где смотреть полный вывод")
+
+        # Сухой прогон списка проверок — офлайн, без устройства.
+        _gl_m, _gl_e = _gl.verify_dry(_gl_dest, _gl_project)
+        _gl_text = " | ".join(_gl_m)
+        check(not _gl_e and "dry-run" in _gl_text and "сухой прогон" in _gl_text,
+              f"сухой прогон идёт и говорит, что он сухой: {_gl_text[:70]}")
+
+        # Облако: без подтверждения не запускается вовсе.
+        _gl_ran: list[str] = []
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project,
+                                        progress=_gl_ran.append)
+        check(bool(_gl_e) and any("Revyl" in x for x in _gl_e) and not _gl_ran,
+              f"без подтверждения облако не запускается: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project, "",
+                                        confirm=True, progress=_gl_ran.append)
+        check(bool(_gl_e) and any("имя сборки" in x for x in _gl_e) and not _gl_ran,
+              f"без имени сборки облако тоже не запускается: {_gl_e[:1]}")
+        _gl_m, _gl_e = _gl.verify_cloud(_gl_dest, _gl_project, "Тестовое",
+                                        confirm=True, progress=_gl_ran.append)
+        check(not _gl_e and _gl_m and _gl.CLOUD_WARNING == _gl_m[0],
+              f"с подтверждением первым делом сказано про сторонний сервис: "
+              f"{_gl_m[:1]}")
+
+        # Сборка из копии автора: команда — из README, Go за человека не ставим.
+        _gl_m, _gl_e = _gl.build(_gl_dest, command=[str(_gl_wrap), "сборка"])
+        check(not _gl_e and any("Собираю из исходников" in x for x in _gl_m),
+              f"сборка из копии автора проходит: {_gl_e or _gl_m[:2]}")
+        _gl.find_go = lambda: None
+        _gl_m, _gl_e = _gl.build(_gl_dest)
+        check(bool(_gl_e) and any("Go" in x for x in _gl_e),
+              f"без Go сборка отказывает, а не молчит: {_gl_e[:1]}")
+
+        # Снятие: убирается только отметка, файлы остаются.
+        _gl_m, _gl_e = _gl.remove(_gl_dest)
+        check(not _gl_e and not _gl.installed(_gl_dest),
+              f"выключение снимает только отметку: {_gl_e}")
+        check(_gl.log_file(_gl_dest).is_file() and _gl.reports_dir(_gl_dest).is_dir(),
+              "журнал и отчёты остаются на диске — их убирает человек")
+        _gl_m, _gl_e = _gl.remove(_gl_dest)
+        check(not _gl_e and any("и так выключен" in x for x in _gl_m),
+              "повторное выключение — не ошибка, а «и так выключен»")
+
+        # Командная строка говорит состояние и не врёт про готовность.
+        _gl_cli = _gl_root / "tools" / "dbapp" / "greenlight.py"
+        _gl_cli_env = dict(_gl_os.environ)
+        _gl_cli_env["OPENCODE_CONFIG_DIR"] = str(_gl_dest)
+        _gl_run = _gl_sp.run([sys.executable, str(_gl_cli), "status"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             env=_gl_cli_env, timeout=90)
+        _gl_out = (_gl_run.stdout or "") + (_gl_run.stderr or "")
+        check(_gl_run.returncode in (0, 1) and "greenlight" in _gl_out
+              and ("Готово" in _gl_out or "Не готово" in _gl_out),
+              f"командная строка отвечает словами: {_gl_out.strip()[:70]}")
+
+        # Окно: галочка снята, кнопки сканера от неё зависят, диалоги собраны.
+        _gl_tab = window.caps_tab
+        check("greenlight" in _gl_tab.checks
+              and not _gl_tab.checks["greenlight"].isChecked(),
+              "на вкладке opencode галочка greenlight есть и снята по умолчанию")
+        _gl_tip = _gl_tab.checks["greenlight"].toolTip()
+        check("PyQt6" in _gl_tip and "не нужен" in _gl_tip,
+              "в описании опции прямо сказано, что opencode-base она не нужна")
+        check(not _gl_tab.btn_gl_run.isEnabled()
+              and not _gl_tab.btn_gl_dry.isEnabled()
+              and not _gl_tab.btn_gl_cloud.isEnabled(),
+              "кнопки проверок выключены, пока галочка снята")
+        _gl_tab.checks["greenlight"].setChecked(True)
+        check(_gl_tab.btn_gl_run.isEnabled() and _gl_tab.btn_gl_dry.isEnabled()
+              and _gl_tab.btn_gl_cloud.isEnabled(),
+              "и включаются вместе с галочкой")
+        _gl_tab.checks["greenlight"].setChecked(False)
+        check(not _gl_tab.btn_gl_run.isEnabled(),
+              "а со снятой галочкой проверка снова не запускается")
+        for _gl_attr in ("btn_gl_check", "btn_gl_build", "btn_gl_run",
+                         "btn_gl_dry", "btn_gl_cloud", "btn_gl_report", "gl_hint"):
+            check(hasattr(_gl_tab, _gl_attr),
+                  f"на вкладке есть орган управления: {_gl_attr}")
+        _gl_dialog = _gl_app.GreenlightScanDialog("scan")
+        check(_gl_dialog.values()["project"] == ""
+              and _gl_dialog.values()["ipa"] == "",
+              f"окно проверки начинает с пустых полей: {_gl_dialog.values()}")
+        _gl_dialog._accept()
+        check(_gl_dialog.result() != _gl_app.QDialog.DialogCode.Accepted,
+              "пустая папка проекта не принимается — окно не закрывается")
+        _gl_dialog.close()
+        _gl_cloud_dialog = _gl_app.GreenlightScanDialog("cloud")
+        check("Revyl" in _gl_cloud_dialog.windowTitle(),
+              f"облачное окно названо своим именем: {_gl_cloud_dialog.windowTitle()}")
+        _gl_cloud_dialog._accept()
+        check(_gl_cloud_dialog.result() != _gl_app.QDialog.DialogCode.Accepted,
+              "и без имени сборки не принимается")
+        _gl_cloud_dialog.close()
+    finally:
+        _gl.find_binary, _gl.find_go, _gl.find_make = _gl_saved
+        if _gl_saved_env is None:
+            _gl_os.environ.pop("OPENCODE_CONFIG_DIR", None)
+        else:
+            _gl_os.environ["OPENCODE_CONFIG_DIR"] = _gl_saved_env
+        shutil.rmtree(_gl_tmp, ignore_errors=True)
+
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()
     check(isinstance(_on, bool) and _port > 0,

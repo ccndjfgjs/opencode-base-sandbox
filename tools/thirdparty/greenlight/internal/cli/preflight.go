@@ -1,0 +1,584 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/RevylAI/greenlight/internal/preflight"
+	"github.com/RevylAI/greenlight/internal/sarif"
+	"github.com/RevylAI/greenlight/internal/verify"
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+)
+
+var (
+	preflightIPA      string
+	preflightAPK      string
+	preflightAAB      string
+	preflightFormat   string
+	preflightOutput   string
+	preflightExitCode bool
+
+	// Runtime tier (--verify): after the static checks, hand flow-dependent
+	// guidelines to Revyl to validate on a cloud device.
+	preflightVerify      bool
+	preflightBuildName   string
+	preflightArtifact    string
+	preflightVarsRaw     []string
+	preflightDeviceModel string
+	preflightOSVersion   string
+)
+
+var preflightCmd = &cobra.Command{
+	Use:   "preflight [path]",
+	Short: "Run ALL checks on your project — one command, zero uploads",
+	Long: `Run every greenlight check in a single command. No App Store Connect
+account needed — everything runs locally on your source code and optional IPA.
+
+Combines:
+  • Code scan     — private APIs, hardcoded secrets, missing ATT, etc.
+  • Privacy scan  — Required Reason APIs, PrivacyInfo.xcprivacy, tracking SDKs
+  • Metadata scan — app.json / Info.plist completeness, icons, version, bundle ID
+  • Play scan     — target API level, restricted permissions, Play Billing (Android)
+  • IPA inspect   — binary analysis (if --ipa is provided)
+
+Android projects are detected automatically, including the android/ directory
+of an Expo or React Native app, so a cross-platform repo is checked against
+both stores in one pass.
+
+Add --verify to continue past the static checks and validate your flow-dependent
+guidelines (account deletion, restore purchases, Sign in with Apple) on a REAL
+device via Revyl — catching broken flows static analysis structurally can't.
+
+Usage:
+  greenlight preflight .
+  greenlight preflight ./my-app --ipa build.ipa
+  greenlight preflight /path/to/project --format json
+  greenlight preflight . --verify --build-name "My App" --var email=qa@acme.com --var password=secret`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runPreflight,
+}
+
+func init() {
+	preflightCmd.Flags().StringVar(&preflightIPA, "ipa", "", "path to .ipa file for binary inspection")
+	preflightCmd.Flags().StringVar(&preflightAPK, "apk", "", "path to a built .apk — adds the merged-manifest and native code checks")
+	preflightCmd.Flags().StringVar(&preflightAAB, "aab", "", "path to a built .aab — adds the merged-manifest and native code checks")
+	preflightCmd.Flags().StringVar(&preflightFormat, "format", "terminal", "output format: terminal, json, sarif")
+	preflightCmd.Flags().StringVar(&preflightOutput, "output", "", "write report to file (stdout if omitted)")
+	preflightCmd.Flags().BoolVar(&preflightExitCode, "exit-code", false, "exit non-zero on any CRITICAL or HIGH finding (or, with --verify, a failed flow) — for CI gating")
+	preflightCmd.Flags().BoolVar(&preflightVerify, "verify", false, "after static checks, validate flow-dependent guidelines on a cloud device via Revyl")
+	preflightCmd.Flags().StringVar(&preflightBuildName, "build-name", "", "Revyl build/app name (for --verify)")
+	preflightCmd.Flags().StringVar(&preflightArtifact, "artifact", "", "upload a prebuilt .app (iOS sim) or .apk (Android) to Revyl before --verify runs")
+	preflightCmd.Flags().StringArrayVar(&preflightVarsRaw, "var", nil, "test variable for --verify, e.g. --var email=qa@acme.com (repeatable)")
+	preflightCmd.Flags().StringVar(&preflightDeviceModel, "device-model", "", "device model for --verify, e.g. \"iPhone 16\"")
+	preflightCmd.Flags().StringVar(&preflightOSVersion, "os-version", "", "OS version for --verify, e.g. \"iOS 26.2\"")
+	rootCmd.AddCommand(preflightCmd)
+}
+
+func runPreflight(cmd *cobra.Command, args []string) error {
+	path := "."
+	if len(args) > 0 {
+		path = args[0]
+	}
+
+	// Verify project path exists
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path must be a directory: %s", path)
+	}
+
+	// Verify IPA path if provided
+	if preflightIPA != "" {
+		if _, err := os.Stat(preflightIPA); os.IsNotExist(err) {
+			return fmt.Errorf("IPA file not found: %s", preflightIPA)
+		}
+	}
+
+	// --apk and --aab both feed the same archive scanner, so only one can be set.
+	if preflightAPK != "" && preflightAAB != "" {
+		return fmt.Errorf("pass --apk or --aab, not both")
+	}
+	androidArtifact := preflightAPK
+	if androidArtifact == "" {
+		androidArtifact = preflightAAB
+	}
+	if androidArtifact != "" {
+		if _, err := os.Stat(androidArtifact); os.IsNotExist(err) {
+			return fmt.Errorf("Android artifact not found: %s", androidArtifact)
+		}
+	}
+
+	// Banner (suppressed for --format json so stdout stays valid JSON).
+	if f := strings.ToLower(preflightFormat); f != "json" && f != "sarif" {
+		purple.Println("\n  greenlight preflight — every check, one command, zero uploads.")
+		fmt.Printf("  Project: %s\n", path)
+		if preflightIPA != "" {
+			fmt.Printf("  IPA:     %s\n", preflightIPA)
+		}
+		if androidArtifact != "" {
+			fmt.Printf("  Android: %s\n", androidArtifact)
+		}
+		// Mirrors the gating in preflight.Run so the banner never advertises a
+		// scanner that will not run.
+		isIOS, isAndroid := preflight.DetectPlatforms(path)
+		var scanners []string
+		if isIOS || !isAndroid {
+			scanners = append(scanners, "metadata", "codescan", "privacy")
+		}
+		if isAndroid || androidArtifact != "" {
+			scanners = append(scanners, "playscan")
+		}
+		if preflightIPA != "" {
+			scanners = append(scanners, "ipa")
+		}
+		fmt.Printf("  Checks:  %s\n\n", strings.Join(scanners, " + "))
+	}
+
+	// Run all checks
+	start := time.Now()
+	result, err := preflight.Run(path, preflightIPA, androidArtifact, verbose)
+	if err != nil {
+		return fmt.Errorf("preflight failed: %w", err)
+	}
+	result.Elapsed = time.Since(start)
+
+	// Output
+	var output *os.File
+	if preflightOutput != "" {
+		output, err = os.Create(preflightOutput)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer output.Close()
+	} else {
+		output = os.Stdout
+	}
+
+	format := strings.ToLower(preflightFormat)
+	isJSON := format == "json"
+	isSARIF := format == "sarif"
+
+	// SARIF represents static code findings; runtime flow results aren't code
+	// locations. Reject the combination up front so we don't run (and bill) a
+	// device flow whose result the SARIF output would silently drop.
+	if isSARIF && preflightVerify {
+		return fmt.Errorf("--format sarif carries static findings only and can't represent --verify runtime results; use --format json for combined output, or run 'greenlight verify' separately")
+	}
+
+	// Default path: static only — offline, zero-account, instant, and complete
+	// on its own. The runtime tier is strictly opt-in; we only leave a light tip.
+	if !preflightVerify {
+		switch {
+		case isJSON:
+			if err := writePreflightJSON(output, result); err != nil {
+				return err
+			}
+		case isSARIF:
+			if err := writePreflightSARIF(output, result); err != nil {
+				return err
+			}
+		default:
+			if err := writePreflightTerminal(output, result); err != nil {
+				return err
+			}
+			dim.Fprintln(output, "  Tip → 'greenlight preflight --verify' also runs your sign-in, purchase, and")
+			dim.Fprintln(output, "        account-deletion flows on a Revyl cloud device to confirm they work.")
+			fmt.Fprintln(output)
+		}
+		return preflightExit(result, nil)
+	}
+
+	// --verify: the static cycle runs, THEN Revyl runs the flows on a device.
+	//
+	// The platform follows the project rather than being fixed to iOS. An
+	// Android-only project verified as iOS would have its artifact rejected and
+	// its flows run against the wrong store's expectations.
+	verifyPlatform := verifyPlatformFor(path, preflightArtifact)
+	if preflightArtifact != "" {
+		if preflightBuildName == "" {
+			return fmt.Errorf("--artifact requires --build-name (to name or match the Revyl app for the uploaded build)")
+		}
+		if err := verify.ValidateArtifact(preflightArtifact, verifyPlatform); err != nil {
+			return err
+		}
+	}
+	vstart := time.Now()
+	vres, verr := verify.Run(verify.Config{
+		ProjectPath: path,
+		BuildName:   preflightBuildName,
+		Platform:    verifyPlatform,
+		Vars:        parseVars(preflightVarsRaw),
+		DeviceModel: preflightDeviceModel,
+		OSVersion:   preflightOSVersion,
+		Artifact:    preflightArtifact,
+	})
+	if verr != nil {
+		return fmt.Errorf("runtime validation failed: %w", verr)
+	}
+	vres.Elapsed = time.Since(vstart)
+
+	if isJSON {
+		if err := writeCombinedJSON(output, result, vres); err != nil {
+			return err
+		}
+		return preflightExit(result, vres)
+	}
+
+	if err := writePreflightTerminal(output, result); err != nil {
+		return err
+	}
+	fmt.Fprintln(output)
+	purple.Fprintln(output, "  → Static checks done. Now validating the flows actually WORK, on a cloud device…")
+	fmt.Fprintln(output)
+	writeVerifyTerminal(output, vres)
+	return preflightExit(result, vres)
+}
+
+// preflightExit maps findings to a non-zero process exit when --exit-code is
+// set: any CRITICAL or HIGH static finding, or (when --verify ran) a failed or
+// errored runtime flow. It returns ErrThreshold, which main() turns into exit 1
+// without printing — the report itself is the user-facing output.
+func preflightExit(result *preflight.Result, vres *verify.Result) error {
+	if !preflightExitCode {
+		return nil
+	}
+	// Critical/High findings, an incomplete scan (a requested scanner crashed),
+	// or a failed runtime flow all fail the gate.
+	fail := result.Summary.Critical > 0 || result.Summary.High > 0 || result.Incomplete
+	if vres != nil && !vres.Summary.Passed {
+		fail = true
+	}
+	if fail {
+		return ErrThreshold
+	}
+	return nil
+}
+
+func writePreflightTerminal(w *os.File, result *preflight.Result) error {
+	red := color.New(color.FgRed, color.Bold)
+	yellow := color.New(color.FgYellow)
+	green := color.New(color.FgGreen, color.Bold)
+
+	// Show context
+	if result.AppName != "" {
+		fmt.Fprintf(w, "  App:     %s\n", result.AppName)
+	}
+	if result.BundleID != "" {
+		fmt.Fprintf(w, "  Bundle:  %s\n", result.BundleID)
+	}
+	if result.HasPrivacyInfo {
+		color.New(color.FgGreen).Fprint(w, "  ✓ ")
+		fmt.Fprintln(w, "PrivacyInfo.xcprivacy found")
+	}
+	if len(result.DetectedAPIs) > 0 {
+		fmt.Fprintf(w, "  APIs:    %s\n", strings.Join(result.DetectedAPIs, ", "))
+	}
+	if len(result.TrackingSDKs) > 0 {
+		yellow.Fprint(w, "  Tracking: ")
+		fmt.Fprintln(w, strings.Join(result.TrackingSDKs, ", "))
+	}
+	fmt.Fprintln(w)
+
+	if len(result.Findings) == 0 {
+		green.Fprintln(w, "  No issues found!")
+		fmt.Fprintln(w)
+		printPreflightFooter(w, result)
+		return nil
+	}
+
+	// Sort: critical first, then warn, then info
+	sort.Slice(result.Findings, func(i, j int) bool {
+		sevRank := map[string]int{"CRITICAL": 4, "HIGH": 3, "WARN": 2, "INFO": 1}
+		ri, rj := sevRank[result.Findings[i].Severity], sevRank[result.Findings[j].Severity]
+		if ri != rj {
+			return ri > rj
+		}
+		return result.Findings[i].Source < result.Findings[j].Source
+	})
+
+	// Group by severity
+	var criticals, highs, warns, infos []preflight.Finding
+	for _, f := range result.Findings {
+		switch f.Severity {
+		case "CRITICAL":
+			criticals = append(criticals, f)
+		case "HIGH":
+			highs = append(highs, f)
+		case "WARN":
+			warns = append(warns, f)
+		case "INFO":
+			infos = append(infos, f)
+		}
+	}
+
+	if len(criticals) > 0 {
+		red.Fprintln(w, "  CRITICAL — Will be rejected")
+		fmt.Fprintln(w)
+		for _, f := range criticals {
+			printPreflightFinding(w, f)
+		}
+	}
+
+	if len(highs) > 0 {
+		color.New(color.FgHiYellow, color.Bold).Fprintln(w, "  HIGH — Likely rejection")
+		fmt.Fprintln(w)
+		for _, f := range highs {
+			printPreflightFinding(w, f)
+		}
+	}
+
+	if len(warns) > 0 {
+		yellow.Fprintln(w, "  WARNING — Worth fixing")
+		fmt.Fprintln(w)
+		for _, f := range warns {
+			printPreflightFinding(w, f)
+		}
+	}
+
+	if len(infos) > 0 {
+		dim.Fprintln(w, "  INFO — Best practices")
+		fmt.Fprintln(w)
+		for _, f := range infos {
+			printPreflightFinding(w, f)
+		}
+	}
+
+	printPreflightFooter(w, result)
+	return nil
+}
+
+func printPreflightFinding(w *os.File, f preflight.Finding) {
+	red := color.New(color.FgRed, color.Bold)
+	yellow := color.New(color.FgYellow)
+	greenC := color.New(color.FgGreen)
+	bold := color.New(color.Bold)
+
+	// Severity badge + source tag
+	switch f.Severity {
+	case "CRITICAL":
+		red.Fprintf(w, "  [CRITICAL] ")
+	case "HIGH":
+		color.New(color.FgHiYellow, color.Bold).Fprintf(w, "  [HIGH]     ")
+	case "WARN":
+		yellow.Fprintf(w, "  [WARN]     ")
+	case "INFO":
+		dim.Fprintf(w, "  [INFO]     ")
+	}
+
+	// Source tag
+	dim.Fprintf(w, "[%s] ", f.Source)
+
+	// Guideline + title. Apple guidelines are numbered sections and read well
+	// with a § prefix; Play policies are named, where § would be wrong.
+	if f.Guideline != "" {
+		if isNumberedGuideline(f.Guideline) {
+			bold.Fprintf(w, "§%s ", f.Guideline)
+		} else {
+			bold.Fprintf(w, "%s: ", f.Guideline)
+		}
+	}
+	bold.Fprintln(w, f.Title)
+
+	// Location
+	if f.File != "" {
+		loc := f.File
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+		}
+		dim.Fprintf(w, "             %s\n", loc)
+	}
+
+	// Code snippet
+	if f.Code != "" {
+		dim.Fprintf(w, "             > %s\n", truncate(f.Code, 80))
+	}
+
+	// Detail
+	fmt.Fprintf(w, "             %s\n", f.Detail)
+
+	// Fix
+	if f.Fix != "" {
+		greenC.Fprintf(w, "             Fix: ")
+		fmt.Fprintln(w, f.Fix)
+	}
+
+	// Policy source, so the developer can go read the rule themselves.
+	if f.Doc != "" {
+		dim.Fprintf(w, "             %s\n", f.Doc)
+	}
+
+	fmt.Fprintln(w)
+}
+
+// isNumberedGuideline reports whether a guideline reference is an Apple-style
+// numbered section ("5.1.1") rather than a named Play policy.
+func isNumberedGuideline(g string) bool {
+	if g == "" {
+		return false
+	}
+	return g[0] >= '0' && g[0] <= '9'
+}
+
+func printPreflightFooter(w *os.File, result *preflight.Result) {
+	red := color.New(color.FgRed, color.Bold)
+	green := color.New(color.FgGreen, color.Bold)
+	hiYellow := color.New(color.FgHiYellow, color.Bold)
+
+	s := result.Summary
+
+	dim.Fprintln(w, "  ─────────────────────────────────────────────")
+	fmt.Fprintln(w)
+
+	switch {
+	case s.Critical > 0:
+		red.Fprint(w, "  NOT READY")
+		fmt.Fprintf(w, " — %d critical issue(s) must be fixed", s.Critical)
+	case s.High > 0:
+		hiYellow.Fprint(w, "  NEEDS REVIEW")
+		fmt.Fprintf(w, " — %d high-risk issue(s) likely to be rejected", s.High)
+	default:
+		green.Fprint(w, "  GREENLIT")
+		fmt.Fprint(w, " — no critical issues found")
+	}
+	fmt.Fprintln(w)
+
+	if s.Total > 0 {
+		fmt.Fprintf(w, "  %d findings: ", s.Total)
+		if s.Critical > 0 {
+			red.Fprintf(w, "%d critical  ", s.Critical)
+		}
+		if s.High > 0 {
+			hiYellow.Fprintf(w, "%d high  ", s.High)
+		}
+		if s.Warns > 0 {
+			color.New(color.FgYellow).Fprintf(w, "%d warn  ", s.Warns)
+		}
+		if s.Infos > 0 {
+			dim.Fprintf(w, "%d info", s.Infos)
+		}
+		fmt.Fprintln(w)
+	}
+
+	// Breakdown by scanner
+	sources := make(map[string]int)
+	for _, f := range result.Findings {
+		sources[f.Source]++
+	}
+	if len(sources) > 0 {
+		var parts []string
+		for _, src := range []string{"metadata", "codescan", "privacy", "ipa"} {
+			if n, ok := sources[src]; ok {
+				parts = append(parts, fmt.Sprintf("%s: %d", src, n))
+			}
+		}
+		dim.Fprintf(w, "  by scanner: %s\n", strings.Join(parts, "  "))
+	}
+
+	dim.Fprintf(w, "  completed in %s\n", result.Elapsed.Round(time.Millisecond))
+
+	// Revyl attribution
+	fmt.Fprintln(w)
+	dim.Fprintln(w, "  ─────────────────────────────────────────────")
+	fmt.Fprintf(w, "  Built by ")
+	purple.Fprint(w, "Revyl")
+	fmt.Fprintln(w, " — the mobile reliability platform")
+	dim.Fprintln(w, "  Catch more than rejections. Catch bugs.")
+	fmt.Fprint(w, "  ")
+	color.New(color.Underline).Fprintln(w, "https://revyl.com")
+	fmt.Fprintln(w)
+}
+
+func preflightJSONObject(result *preflight.Result) interface{} {
+	return struct {
+		ProjectPath    string              `json:"project_path"`
+		IPAPath        string              `json:"ipa_path,omitempty"`
+		AppName        string              `json:"app_name,omitempty"`
+		BundleID       string              `json:"bundle_id,omitempty"`
+		HasPrivacyInfo bool                `json:"has_privacy_info"`
+		DetectedAPIs   []string            `json:"detected_apis,omitempty"`
+		TrackingSDKs   []string            `json:"tracking_sdks,omitempty"`
+		IsAndroid      bool                `json:"is_android"`
+		PackageName    string              `json:"package_name,omitempty"`
+		TargetSDK      int                 `json:"target_sdk,omitempty"`
+		Findings       []preflight.Finding `json:"findings"`
+		Summary        preflight.Summary   `json:"summary"`
+		Elapsed        string              `json:"elapsed"`
+	}{
+		ProjectPath:    result.ProjectPath,
+		IPAPath:        result.IPAPath,
+		AppName:        result.AppName,
+		BundleID:       result.BundleID,
+		HasPrivacyInfo: result.HasPrivacyInfo,
+		DetectedAPIs:   result.DetectedAPIs,
+		TrackingSDKs:   result.TrackingSDKs,
+		IsAndroid:      result.IsAndroid,
+		PackageName:    result.PackageName,
+		TargetSDK:      result.TargetSDK,
+		Findings:       result.Findings,
+		Summary:        result.Summary,
+		Elapsed:        result.Elapsed.Round(time.Millisecond).String(),
+	}
+}
+
+func writePreflightJSON(w *os.File, result *preflight.Result) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(preflightJSONObject(result))
+}
+
+func writePreflightSARIF(w *os.File, result *preflight.Result) error {
+	sf := make([]sarif.Finding, 0, len(result.Findings))
+	for _, f := range result.Findings {
+		sf = append(sf, sarif.Finding{
+			Severity:  f.Severity,
+			Title:     f.Title,
+			Detail:    f.Detail,
+			Guideline: f.Guideline,
+			File:      f.File,
+			Line:      f.Line,
+		})
+	}
+	return sarif.Write(w, "greenlight", appVersion, greenlightInfoURI, sf)
+}
+
+// writeCombinedJSON emits the static result and the runtime (Revyl) result
+// together under one object — used when --verify is chained with --format json.
+func writeCombinedJSON(w *os.File, result *preflight.Result, vres *verify.Result) error {
+	combined := struct {
+		Static  interface{} `json:"static"`
+		Runtime interface{} `json:"runtime"`
+	}{
+		Static:  preflightJSONObject(result),
+		Runtime: verifyJSONObject(vres),
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(combined)
+}
+
+// verifyPlatformFor picks the platform the runtime tier should target. An
+// explicit artifact extension is authoritative, since the file itself says what
+// it is; otherwise the project layout decides, defaulting to iOS for a
+// cross-platform or unrecognised project because the App Store flows are the
+// ones greenlight models most completely.
+func verifyPlatformFor(projectPath, artifact string) string {
+	switch strings.ToLower(filepath.Ext(artifact)) {
+	case ".apk":
+		return "android"
+	case ".app":
+		return "ios"
+	}
+	isIOS, isAndroid := preflight.DetectPlatforms(projectPath)
+	if isAndroid && !isIOS {
+		return "android"
+	}
+	return "ios"
+}

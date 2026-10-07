@@ -25,6 +25,7 @@ if __package__ in (None, ""):
     import dbhub  # type: ignore[import-not-found]
     import lmarena  # type: ignore[import-not-found]
     import auto_improve  # type: ignore[import-not-found]
+    import greenlight  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
     import pxpipe  # type: ignore[import-not-found]
     import rtk  # type: ignore[import-not-found]
@@ -32,8 +33,9 @@ if __package__ in (None, ""):
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio,
-                   auto_improve, bridges, browsers, caveman, dbhub, lmarena,
-                   omniroute, program_cards, pxpipe, rtk, winget_install)
+                   auto_improve, bridges, browsers, caveman, dbhub, greenlight,
+                   lmarena, omniroute, program_cards, pxpipe, rtk,
+                   winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2955,6 +2957,134 @@ class AutoImproveDialog(QDialog):
         self.accept()
 
 
+class GreenlightScanDialog(QDialog):
+    """Что проверять greenlight: папка iOS-проекта и, если есть, собранный .ipa.
+
+    Ключи и флаги не спрашиваются: команды взяты из README автора. Для
+    облачной проверки тот же диалог спрашивает имя сборки — но сам облачный
+    запуск начинается только после отдельного подтверждения в окне.
+    """
+
+    def __init__(self, mode: str = "scan", parent=None) -> None:
+        super().__init__(parent)
+        self.mode = mode if mode in ("scan", "cloud") else "scan"
+        self.setMinimumWidth(720)
+        if self.mode == "cloud":
+            self.setWindowTitle("greenlight: проверка в облаке Revyl")
+        else:
+            self.setWindowTitle("greenlight: проверка iOS-приложения")
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        if self.mode == "cloud":
+            box.addWidget(ui.label(
+                "Проверка в облаке Revyl: greenlight отдаст сценарии "
+                "(восстановление покупок, вход через Apple, удаление "
+                "аккаунта) во внешний сервис и запустит их на облачном "
+                "устройстве. Нужны установленный CLI revyl и бесплатный "
+                "аккаунт. Всё остальное в greenlight работает офлайн.",
+                wrap=True,
+            ))
+        else:
+            box.addWidget(ui.label(
+                "greenlight проверит папку проекта против правил Apple: код, "
+                "файлы приватности, Info.plist и, если указать, собранный "
+                ".ipa. Проверка офлайн — наружу ничего не отправляется.",
+                wrap=True,
+            ))
+
+        row_project = QHBoxLayout()
+        row_project.addWidget(QLabel("Папка проекта:   "))
+        self.project = QLineEdit()
+        self.project.setPlaceholderText("папка с кодом приложения")
+        self.btn_pick_project = QPushButton("Выбрать…")
+        self.btn_pick_project.clicked.connect(self._pick_project)
+        row_project.addWidget(self.project, 1)
+        row_project.addWidget(self.btn_pick_project)
+        box.addLayout(row_project)
+
+        if self.mode == "cloud":
+            row_name = QHBoxLayout()
+            row_name.addWidget(QLabel("Имя сборки:   "))
+            self.build_name = QLineEdit()
+            self.build_name.setPlaceholderText(
+                "имя приложения или сборки в Revyl — из команды --build-name"
+            )
+            row_name.addWidget(self.build_name, 1)
+            box.addLayout(row_name)
+            self.ipa = QLineEdit()  # в облаке путь к ipa не нужен
+        else:
+            row_ipa = QHBoxLayout()
+            row_ipa.addWidget(QLabel("Файл .ipa:   "))
+            self.ipa = QLineEdit()
+            self.ipa.setPlaceholderText("необязательно: собранный .ipa для разбора бинарника")
+            self.btn_pick_ipa = QPushButton("Выбрать…")
+            self.btn_pick_ipa.clicked.connect(self._pick_ipa)
+            row_ipa.addWidget(self.ipa, 1)
+            row_ipa.addWidget(self.btn_pick_ipa)
+            box.addLayout(row_ipa)
+            self.build_name = QLineEdit()
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Проверить" if self.mode == "scan" else "Продолжить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _pick_project(self) -> None:
+        start = self.project.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Папка iOS-проекта", start if Path(start).is_dir() else str(Path.home())
+        )
+        if chosen:
+            self.project.setText(chosen)
+
+    def _pick_ipa(self) -> None:
+        start = self.ipa.text().strip() or str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Собранный файл .ipa", str(Path(start).parent),
+            "Приложение iOS (*.ipa);;Все файлы (*)",
+        )
+        if chosen:
+            self.ipa.setText(chosen)
+
+    def values(self) -> dict:
+        """Выбор человека. Проверки полей — тут же, до запуска."""
+        return {
+            "project": self.project.text().strip(),
+            "ipa": self.ipa.text().strip(),
+            "build_name": self.build_name.text().strip(),
+        }
+
+    def _accept(self) -> None:
+        values = self.values()
+        if not values["project"]:
+            self.status.setText("Не выбрана папка проекта.")
+            return
+        if not Path(values["project"]).is_dir():
+            self.status.setText("Такой папки нет: " + values["project"])
+            return
+        if values["ipa"] and not Path(values["ipa"]).is_file():
+            self.status.setText("Такого файла .ipa нет: " + values["ipa"])
+            return
+        if self.mode == "cloud" and not values["build_name"]:
+            self.status.setText(
+                "Не указано имя сборки: команда verify запускается с "
+                "«--build-name <имя>» (см. README автора)."
+            )
+            return
+        self.accept()
+
+
 class LmarenaTokenDialog(QDialog):
     """Токен арены: вписать свежую куку `arena-auth-prod-v1`.
 
@@ -3053,6 +3183,7 @@ class CapsTab(ScrollPage):
         "caveman": "caveman — ответы короче (правила в AGENTS.md)",
         "pxpipe": "pxpipe — запросы картинками (локальный прокси)",
         "auto-improve": "auto-improve — улучшение текста (цикл с судьёй)",
+        "greenlight": "greenlight — проверка iOS-приложения перед App Store",
     }
 
     def __init__(self, parent=None) -> None:
@@ -3126,6 +3257,18 @@ class CapsTab(ScrollPage):
                     "файл…» работает, только когда галочка отмечена"
                 )
                 box.toggled.connect(self._ai_toggled)
+            if name == "greenlight":
+                box.setToolTip(
+                    "Сторонний консольный сканер автора Revyl (MIT): читает "
+                    "исходники, файлы приватности и Info.plist, сверяет с "
+                    "правилами Apple и выдаёт список рисков с исправлениями. "
+                    "Основная проверка идёт офлайн, наружу ничего не "
+                    "отправляется. Для opencode-base (PyQt6, Windows) он не "
+                    "нужен — это опция для тех, кто делает приложения для "
+                    "iOS. Кнопка «Проверить iOS-приложение» работает, только "
+                    "когда галочка отмечена"
+                )
+                box.toggled.connect(self._gl_toggled)
             what_layout.addWidget(box)
             self.checks[name] = box
         # Уровень caveman — единственная возможность с выбором внутри
@@ -3256,6 +3399,70 @@ class CapsTab(ScrollPage):
         row_ai_btns.addStretch(1)
         ai_layout.addLayout(row_ai_btns)
         what_layout.addWidget(box_ai)
+        # --- greenlight: тоже не только галочка. Проверка окружения, сборка
+        # из исходников и три прогона — свои кнопки, а всё, что запускает
+        # сканер, снято, пока галочка не отмечена: по умолчанию он выключен.
+        box_gl = QGroupBox("greenlight — проверить iOS-приложение перед App Store")
+        gl_layout = QVBoxLayout(box_gl)
+        gl_layout.addWidget(ui.label(
+            "Сторонний консольный сканер автора Revyl (лицензия MIT): читает "
+            "исходники, файлы приватности и Info.plist и сверяет их с "
+            "правилами Apple App Store Review Guidelines, показывая находки "
+            "с уровнями CRITICAL, HIGH, WARN и INFO. Основная проверка "
+            "работает офлайн: наружу ничего не отправляется. Для "
+            "opencode-base (PyQt6, Windows) он не нужен — это опция для тех, "
+            "кто делает приложения для iOS.",
+            kind="dim",
+            wrap=True,
+        ))
+        self.gl_hint = ui.label("", kind="dim", wrap=True)
+        gl_layout.addWidget(self.gl_hint)
+        row_gl_btns = QHBoxLayout()
+        self.btn_gl_check = QPushButton("Проверить окружение")
+        self.btn_gl_check.setToolTip(
+            "Проверка без запуска: собран ли greenlight, сходится ли копия "
+            "исходников автора и есть ли Go с make для сборки. Ничего не "
+            "меняет и никуда не звонит"
+        )
+        self.btn_gl_build = QPushButton("Собрать greenlight")
+        self.btn_gl_build.setToolTip(
+            "Сборка из лежащих рядом исходников автора: `make build`, а без "
+            "make — та же команда напрямую. Нужен Go 1.24 или новее и "
+            "соединение с интернетом: зависимости Go программа не кладёт, "
+            "их качает сам go. Программа не ставит Go и не собирает ничего "
+            "без этой кнопки"
+        )
+        self.btn_gl_run = QPushButton("Проверить iOS-приложение…")
+        self.btn_gl_run.setToolTip(
+            "Основная проверка: greenlight preflight по папке проекта — "
+            "офлайн. Отдельно сохраняется машинный отчёт (JSON) рядом с "
+            "настройками. Кнопка доступна только при отмеченной галочке "
+            "greenlight"
+        )
+        self.btn_gl_dry = QPushButton("Список проверок")
+        self.btn_gl_dry.setToolTip(
+            "greenlight verify --dry-run: офлайн-прогон без устройства и "
+            "без аккаунта, показывает, какие сценарии будут проверяться, и "
+            "печатает готовые файлы тестов"
+        )
+        self.btn_gl_cloud = QPushButton("Проверка в облаке Revyl…")
+        self.btn_gl_cloud.setToolTip(
+            "Чужой облачный сервис Revyl: greenlight отправит туда "
+            "сценарии и запустит их на облачном устройстве. Понадобится "
+            "подтверждение, установленный CLI revyl и бесплатный аккаунт. "
+            "Кнопка доступна только при отмеченной галочке greenlight"
+        )
+        self.btn_gl_report = QPushButton("Открыть отчёты")
+        self.btn_gl_report.setToolTip(
+            "Машинные отчёты прошлых прогонов: лежат рядом с настройками "
+            "opencode в папке greenlight-data/отчёты. Ничего не запускает"
+        )
+        for button in (self.btn_gl_check, self.btn_gl_build, self.btn_gl_run,
+                       self.btn_gl_dry, self.btn_gl_cloud, self.btn_gl_report):
+            row_gl_btns.addWidget(button)
+        row_gl_btns.addStretch(1)
+        gl_layout.addLayout(row_gl_btns)
+        what_layout.addWidget(box_gl)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -3666,6 +3873,12 @@ class CapsTab(ScrollPage):
         self.btn_ai_check.clicked.connect(self._ai_check)
         self.btn_ai_run.clicked.connect(self._ai_run)
         self.btn_ai_history.clicked.connect(self._ai_history)
+        self.btn_gl_check.clicked.connect(self._gl_check)
+        self.btn_gl_build.clicked.connect(self._gl_build)
+        self.btn_gl_run.clicked.connect(self._gl_run)
+        self.btn_gl_dry.clicked.connect(self._gl_dry)
+        self.btn_gl_cloud.clicked.connect(self._gl_cloud)
+        self.btn_gl_report.clicked.connect(self._gl_report)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -3674,6 +3887,9 @@ class CapsTab(ScrollPage):
         # «Улучшить файл…» доступна, только когда галочка auto-improve
         # отмечена: по умолчанию цикл запускать нечем.
         self._ai_toggled(self.checks["auto-improve"].isChecked())
+        # Кнопки greenlight — по галочке greenlight: по умолчанию сканер
+        # выключен и ничего не запускается.
+        self._gl_toggled(self.checks["greenlight"].isChecked())
         self._refresh()
 
         outer.activate()
@@ -4830,6 +5046,23 @@ class CapsTab(ScrollPage):
             self.ai_key_hint.setText(auto_improve.key_status(dest) + ".")
             self.ai_hint.setText(auto_improve.status_text(dest))
             self.btn_ai_run.setEnabled(bool(self.checks["auto-improve"].isChecked()))
+        # Строка про greenlight: не собран, нет Go или копия разошлась — об
+        # этом надо сказать до нажатия, а не после.
+        try:
+            gl = greenlight.check(dest)
+        except Exception:
+            gl = {}
+        if gl:
+            if gl.get("ready"):
+                notes.append("greenlight: " + greenlight.status_text(dest))
+            else:
+                notes.append(
+                    "greenlight: не готов — " + "; ".join(gl.get("missing") or []) + "."
+                )
+            self.gl_hint.setText(greenlight.status_text(dest))
+            self.btn_gl_run.setEnabled(bool(self.checks["greenlight"].isChecked()))
+            self.btn_gl_dry.setEnabled(bool(self.checks["greenlight"].isChecked()))
+            self.btn_gl_cloud.setEnabled(bool(self.checks["greenlight"].isChecked()))
         # Список источников для pxpipe: читаем здесь, в главном потоке.
         try:
             choices = pxpipe.provider_choices(dest)
@@ -4991,6 +5224,26 @@ class CapsTab(ScrollPage):
                 "warn",
             )
 
+    def _gl_toggled(self, on: bool) -> None:
+        """Галочка greenlight разрешает кнопки сканера.
+
+        Как и у auto-improve, галочка сама ничего не запускает: она лишь
+        открывает кнопки. Облачная проверка вдобавок требует отдельного
+        подтверждения — про это сказано и в окне, и в журнале.
+        """
+        for name in ("btn_gl_run", "btn_gl_dry", "btn_gl_cloud"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(bool(on))
+        if on:
+            self.log.add(
+                "greenlight отмечен. Проверка «preflight» и «список проверок» "
+                "идут офлайн; «Проверка в облаке Revyl» отправит сценарии в "
+                "сторонний сервис — для неё спрашивается отдельное "
+                "подтверждение.",
+                "warn",
+            )
+
     def _ai_dest(self) -> Path | None:
         """Папка настроек для кнопок auto-improve. None — не выбрана."""
         dest = self._dest()
@@ -5105,6 +5358,151 @@ class CapsTab(ScrollPage):
             return auto_improve.history(dest, chosen, progress=progress)
 
         self._start(job, "auto-improve")
+
+    def _gl_dest(self) -> Path | None:
+        """Папка настроек для кнопок greenlight. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _gl_check(self) -> None:
+        """Живая проверка окружения greenlight. Ничего не меняет."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            data = greenlight.check(dest)
+            line = ("Живая проверка: " if data.get("binary_ok") else "Живая проверка не прошла: ")
+            text = greenlight.status_text(dest)
+            if data.get("ready"):
+                return [line + text], []
+            return [line + text], list(data.get("missing") or []) or [text]
+
+        self._start(job, "greenlight")
+
+    def _gl_build(self) -> None:
+        """Собирает greenlight из исходников автора. Go программа не ставит."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not greenlight.find_go():
+            self._warn(greenlight.NO_GO_NOTE)
+            return
+        answer = QMessageBox.question(
+            self,
+            "Сборка greenlight",
+            "Собрать greenlight из исходников автора командой `make build` "
+            "(а без make — той же командой напрямую)?\n\n"
+            "Нужны Go 1.24 или новее и интернет: исходники автора лежат "
+            "рядом, а вот зависимости Go качает сам `go`. Сборка займёт "
+            "несколько минут.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def job(progress):
+            return greenlight.build(dest, progress=progress)
+
+        self._start(job, "greenlight")
+
+    def _gl_run(self) -> None:
+        """Основная проверка iOS-приложения. Офлайн."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку «greenlight — проверка iOS-приложения "
+                "перед App Store»: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("scan", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+
+        def job(progress):
+            return greenlight.scan(
+                dest, values["project"], ipa=values["ipa"], progress=progress,
+            )
+
+        self._start(job, "greenlight")
+
+    def _gl_dry(self) -> None:
+        """Список проверок без облака: verify --dry-run. Офлайн."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку greenlight: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("scan", self)
+        dialog.setWindowTitle("greenlight: список проверок без облака")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+
+        def job(progress):
+            return greenlight.verify_dry(dest, values["project"], progress=progress)
+
+        self._start(job, "greenlight")
+
+    def _gl_cloud(self) -> None:
+        """Проверка в облаке Revyl — только по явному подтверждению.
+
+        Подтверждение спрашивается отдельно и перед каждым запуском: тут
+        единственное место, где greenlight выходит наружу, и «однажды
+        согласился» здесь не считается.
+        """
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        if not self.checks["greenlight"].isChecked():
+            self._warn(
+                "Сначала отметь галочку greenlight: по умолчанию сканер выключен."
+            )
+            return
+        dialog = GreenlightScanDialog("cloud", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        answer = QMessageBox.question(
+            self, "Проверка в облаке Revyl", greenlight.CLOUD_WARNING,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.log.add("Облачная проверка отменена: подтверждения не было.", "warn")
+            return
+
+        def job(progress):
+            return greenlight.verify_cloud(
+                dest, values["project"], values["build_name"],
+                confirm=True, progress=progress,
+            )
+
+        self._start(job, "greenlight")
+
+    def _gl_report(self) -> None:
+        """Открывает папку с машинными отчётами. Ничего не запускает."""
+        dest = self._gl_dest()
+        if dest is None:
+            return
+        folder = greenlight.reports_dir(dest)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except OSError as exc:
+            self._warn(f"Папку отчётов открыть не удалось: {exc}")
+            return
+        files = greenlight.reports_seen(dest)
+        self.log.add(
+            f"Отчёты greenlight: {len(files)} в {folder}."
+            if files else f"Отчётов пока нет — папка открыта: {folder}.",
+            "info",
+        )
 
     def _px_confirm(self) -> bool:
         """Спрашивает согласие на сжатие запросов картинками.

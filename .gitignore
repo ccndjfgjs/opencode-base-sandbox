@@ -144,3 +144,13 @@ tools/thirdparty/lmarena/.venv/
 # этой машины, а не часть репозитория.
 auto-improve-key.txt
 auto-improve-data/
+
+# greenlight (пункт 7 плана, сканер автора Revyl). Папка build/ — собранный
+# сканер: у автора он собирается из исходников командой `make build` и
+# лежит в build/greenlight. Слепок двоичного файла на 16 МБ в репозитории
+# не нужен: он собирается заново на машине, где есть Go 1.24 или новее.
+tools/thirdparty/greenlight/build/
+
+# Данные greenlight рядом с настройками opencode: вывод прогонов и машинные
+# отчёты (JSON) по проектам этой машины. По образцу auto-improve-data/ выше.
+greenlight-data/
