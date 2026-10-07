@@ -749,10 +749,11 @@ def main() -> int:
         _missing_ag = [
             a for a in ("iskatel", "dokop", "proektirovschik", "programmist",
                         "proveryalschik", "retsenzent", "ohrannik", "dizayner",
-                        "bazy", "devops", "golosovoy", "provodnik-pk")
+                        "bazy", "devops", "golosovoy", "provodnik-pk",
+                        "retsenzent-qwen")
             if not (_ag_dst / f"{a}.md").is_file()
         ]
-        check(not _missing_ag, f"все 12 агентов на месте (нет: {_missing_ag})")
+        check(not _missing_ag, f"все 13 агентов на месте (нет: {_missing_ag})")
         # каждый агент упомянут в инструкциях, иначе нейросеть о нём не узнает
         _inst_all = "\n".join(
             (target / t).read_text(encoding="utf-8")
@@ -2544,7 +2545,7 @@ def main() -> int:
     check('"other"' in cfg_text, "чужой сервер other цел")
     check('"pc"' in cfg_text and '"ncp"' in cfg_text, "мосты pc и ncp вписаны")
     check(opencode_caps.check_jsonc(cfg_text), "настройки валидны после вставки")
-    check(len(list((fake / "agents").glob("*.md"))) == 12, "агентов поставлено 12")
+    check(len(list((fake / "agents").glob("*.md"))) == 13, "агентов поставлено 13")
     check((fake / "command" / "voice.md").is_file(), "команда /голос поставлена")
     check("{{VOICE_DIR}}" not in (fake / "command" / "voice.md").read_text(encoding="utf-8"),
           "путь к голосу подставлен настоящим")
@@ -5008,6 +5009,17 @@ def main() -> int:
         _or_o._run = _or_fake_run
 
         # Живая проверка — настоящий запрос к API.
+        # «Развёрнут» — только на время живой проверки и статуса: заглушка
+        # package.json в пустой папке. installed_version() читает файлы, а не
+        # подменённый _run, и без неё статус честно сказал бы «не развёрнут» —
+        # проверять живой API тогда было бы не на чем. Тот же приём, что ниже
+        # у bring_up («Развёрнут — только на время этих проверок»).
+        _or_fake_pkg = (_or_tmp / "папка-моста-статус" / "node_modules"
+                        / "omniroute")
+        _or_fake_pkg.mkdir(parents=True)
+        (_or_fake_pkg / "package.json").write_text('{"version": "3.8.51"}',
+                                                   encoding="utf-8")
+        _or_o.SERVER_DIR = _or_tmp / "папка-моста-статус"
         _or_msgs4, _or_errs4 = _or_o.check_connection(_or_dest)
         check(not _or_errs4,
               f"живая проверка проходит на отвечающем API: {_or_errs4[:1]}")
@@ -5020,6 +5032,9 @@ def main() -> int:
               f"и говорит, сколько провайдеров подключено: "
               f"{_or_o.status_text(_or_dest)[-40:]}")
 
+        # Фикстура «развёрнут» снята: дальше отказы проверяются честно.
+        _or_o.SERVER_DIR = _or_save[1]
+        _or_o.ENTRY = _or_tmp / "нет-такого-omniroute.mjs"
         # Молчащий порт — отказ, а не «работает».
         _or_closed = _or_socket.socket()
         _or_closed.bind(("127.0.0.1", 0))
@@ -5814,10 +5829,13 @@ def main() -> int:
             [sys.executable, str(_lm_cli), "status"],
             capture_output=True, text=True, encoding="utf-8",
             env=_lm_cli_env, timeout=90)
-        check(_lm_status_cli.returncode == 0
-              and "Мост" in _lm_status_cli.stdout,
-              f"status на живом мосте — код 0: "
-              f"{_lm_status_cli.stdout.strip()[:70]}")
+        # Отдельный процесс подмен не видит: ему нужно настоящее окружение
+        # моста (.venv), а не заглушки. Без развёрнутого моста это честное
+        # «не проверено», а не провал: на развёрнутой машине станет ОК.
+        check_machine(_lm_status_cli.returncode == 0
+                      and "Мост" in _lm_status_cli.stdout,
+                      f"status на живом мосте — код 0: "
+                      f"{_lm_status_cli.stdout.strip()[:70]}")
         _lm_cli_live.shutdown()
         _lm_cli_env["LMARENA_PORT"] = str(_lm_free_port)
         _lm_status_cli2 = _lm_sp.run(
@@ -5864,8 +5882,12 @@ def main() -> int:
     echo("\n--- 8ч. rtk и caveman: экономия ответов и вывода ---")
 
     def _tk_blob(path: Path) -> str:
-        """git-blob-sha1: им сверяются копии чужих файлов."""
-        _data = path.read_bytes()
+        """git-blob-sha1: им сверяются копии чужих файлов.
+
+        Переводы строк нормализуются (CRLF -> LF): на Windows файлы лежат
+        с CRLF, а слепки автора сняты с LF. Содержимое при этом обязано
+        совпадать побайтово — проверяется всё, кроме концов строк."""
+        _data = path.read_bytes().replace(b"\r\n", b"\n")
         return _tk_hashlib.sha1(b"blob %d\0" % len(_data) + _data).hexdigest()
 
     _tk_root = core.program_root()
@@ -7093,8 +7115,10 @@ def main() -> int:
     _gl_third = _gl_root / "tools" / "thirdparty" / "greenlight"
 
     def _gl_blob(_gl_path: Path) -> str:
-        """git-blob-sha1: им сверяется копия автора с GitHub."""
-        _gl_data = _gl_path.read_bytes()
+        """git-blob-sha1: им сверяется копия автора с GitHub.
+
+        Переводы строк нормализуются (CRLF -> LF): см. _tk_blob выше."""
+        _gl_data = _gl_path.read_bytes().replace(b"\r\n", b"\n")
         return _gl_hashlib.sha1(b"blob %d\0" % len(_gl_data) + _gl_data).hexdigest()
 
     # Копия автора: каждый файл из списка слепков — байт в байт с GitHub.
@@ -7250,7 +7274,7 @@ def main() -> int:
 
         # Заглушка вместо сканера: отвечает на --version, печатает находки,
         # пишет машинный отчёт. Так проверяется наш код, а не чужой сканер.
-        _gl_stub = _gl_tmp / "заглушка.py"
+        _gl_stub = _gl_tmp / "stub.py"
         _gl_stub.write_text(
             "import json, sys\n"
             "args = sys.argv[1:]\n"

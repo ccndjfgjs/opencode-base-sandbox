@@ -43,6 +43,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 #: Откуда взята программа и по какому коммиту сверялись её байты.
 SOURCE = "https://github.com/RevylAI/greenlight"
@@ -242,7 +244,7 @@ def sources_check() -> tuple[bool, int, list[str]]:
         if not path.is_file():
             bad.append(f"нет файла {rel}")
             continue
-        data = path.read_bytes()
+        data = path.read_bytes().replace(b"\r\n", b"\n")
         sha = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
         if sha == want:
             good += 1

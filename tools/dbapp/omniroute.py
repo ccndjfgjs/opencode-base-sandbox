@@ -47,6 +47,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 #: Пакет из npm. Версию не прибиваем: README советует ставить последнюю,
 #: а какая именно встала — видно в статусе.

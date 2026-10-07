@@ -43,16 +43,18 @@ CAPS = (
     ("pxpipe", "pxpipe — запросы картинками"),
     ("auto-improve", "auto-improve — улучшение текста"),
     ("greenlight", "greenlight — проверка iOS-перед App Store"),
+    ("qwen-review", "Qwen Code — второй ревьюер"),
 )
 
 #: Что вкладка «opencode» спрашивает у человека: только расширения.
 #: Мостов здесь нет — они едут с базой и включаются всегда.
-#: rtk, caveman, pxpipe, auto-improve и greenlight — не MCP-серверы и не
-#: мосты: rtk кладёт в настройки плагин, caveman — правила в AGENTS.md,
-#: pxpipe — запись провайдера на локальный прокси, auto-improve живёт
-#: отметкой в манифесте и копией скрипта, greenlight — собранным из копии
-#: автора бинарником. Все пятеро живут в tools/thirdparty и в реестр
-#: mcp-registry.json не попадают.
+#: rtk, caveman, pxpipe, auto-improve, greenlight и qwen-review — не
+#: MCP-серверы и не мосты: rtk кладёт в настройки плагин, caveman — правила
+#: в AGENTS.md, pxpipe — запись провайдера на локальный прокси, auto-improve
+#: живёт отметкой в манифесте и копией скрипта, greenlight — собранным из
+#: копии автора бинарником, а qwen-review — вторым ревьюером: развёрнутым
+#: Qwen Code и выбором модели из провайдеров opencode. Ни один из них
+#: в реестр mcp-registry.json не попадает.
 CAPS_CHOICES = (
     ("voice", "Команда /голос"),
     ("agents", "12 агентов"),
@@ -62,15 +64,18 @@ CAPS_CHOICES = (
     ("pxpipe", "pxpipe — запросы картинками"),
     ("auto-improve", "auto-improve — улучшение текста"),
     ("greenlight", "greenlight — проверка iOS-перед App Store"),
+    ("qwen-review", "Qwen Code — второй ревьюер"),
 )
 
 #: Галочки, которые при открытии вкладки стоят снятыми: у rtk нужен
 #: бинарник в PATH, caveman меняет стиль ответов, pxpipe переписывает
 #: запрос картинками, auto-improve тратит токены и коммитит в репозиторий
-#: файла, а greenlight и вовсе нужен только тем, кто делает приложения для
-#: iOS: самому opencode-base (PyQt6, Windows) он не нужен. Включать такое
-#: молча, «по умолчанию», нельзя.
-CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe", "auto-improve", "greenlight")
+#: файла, greenlight и вовсе нужен только тем, кто делает приложения для
+#: iOS: самому opencode-base (PyQt6, Windows) он не нужен, а второй ревьюер
+#: (qwen-review) тратит токены и отправляет код изменений выбранному
+#: провайдеру. Включать такое молча, «по умолчанию», нельзя.
+CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe", "auto-improve", "greenlight",
+                       "qwen-review")
 
 #: Что подставляется всегда, без галочки: мосты — часть базы, а не опция.
 CAPS_ALWAYS = ("pc", "ncp")
@@ -1060,6 +1065,14 @@ def install_caps(
         messages += m_gl
         errors += e_gl
 
+    # --- qwen-review: свой модуль. Живая проверка — отвечающий qwen и
+    # выбранная модель; не развёрнут или модель не выбрана — в настройки
+    # ничего не пишем и говорим об этом прямо.
+    if "qwen-review" in selection:
+        m_qw, e_qw = _qwen_review_module().install(dest, progress=progress)
+        messages += m_qw
+        errors += e_qw
+
     if (
         "pc" in selection
         or "ncp" in selection
@@ -1071,6 +1084,7 @@ def install_caps(
         or "pxpipe" in selection
         or "auto-improve" in selection
         or "greenlight" in selection
+        or "qwen-review" in selection
     ):
         say("Перезапустите opencode: настройки читаются при старте.")
     return messages, errors
@@ -1109,6 +1123,13 @@ def _greenlight_module():
     import greenlight  # noqa: PLC0415 — рядом лежит, круга нет
 
     return greenlight
+
+
+def _qwen_review_module():
+    """Модуль второго ревьюера рядом."""
+    import qwen_review  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return qwen_review
 
 
 def place_file(
@@ -1237,6 +1258,13 @@ def remove_caps(
         messages += m_gl
         errors += e_gl
 
+    # --- qwen-review: снимается только отметка. Развёрнутый Qwen Code,
+    # настройки и ход споров остаются на диске.
+    if "qwen-review" in selection:
+        m_qw, e_qw = _qwen_review_module().remove(dest, progress=progress)
+        messages += m_qw
+        errors += e_qw
+
     # --- обход блокировок: убирает свой модуль сам, в запас, не в корзину.
     if "antiblock" in selection:
         try:
@@ -1304,6 +1332,10 @@ def caps_status(dest: Path) -> dict[str, bool]:
         pass
     try:
         status["greenlight"] = bool(_greenlight_module().installed(dest))
+    except Exception:
+        pass
+    try:
+        status["qwen-review"] = bool(_qwen_review_module().installed(dest))
     except Exception:
         pass
     _ = manifest

@@ -52,6 +52,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 #: Адрес и версия форка, по которому сверялись команды и адреса API.
 SOURCE = "https://github.com/CloudWaddie/LMArenaBridge"

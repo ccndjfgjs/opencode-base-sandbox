@@ -40,6 +40,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+import sys
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ------------------------------------------------------------------ источник
 

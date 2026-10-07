@@ -26,6 +26,7 @@ if __package__ in (None, ""):
     import lmarena  # type: ignore[import-not-found]
     import auto_improve  # type: ignore[import-not-found]
     import greenlight  # type: ignore[import-not-found]
+    import qwen_review  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
     import pxpipe  # type: ignore[import-not-found]
     import rtk  # type: ignore[import-not-found]
@@ -34,7 +35,7 @@ if __package__ in (None, ""):
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio,
                    auto_improve, bridges, browsers, caveman, dbhub, greenlight,
-                   lmarena, omniroute, program_cards, pxpipe, rtk,
+                   lmarena, omniroute, program_cards, pxpipe, qwen_review, rtk,
                    winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -2957,6 +2958,155 @@ class AutoImproveDialog(QDialog):
         self.accept()
 
 
+class QwenReviewDialog(QDialog):
+    """Что проверять вторым ревьюером: папка проекта и база сравнения.
+
+    Дальше — обычная проверка: изменения берутся командой `git diff`,
+    ревьюер идёт в режиме «только чтение» и файлы не правит.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Qwen Code: ревью изменений")
+        self.setMinimumWidth(720)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Второй ревьюер прочитает `git diff` проекта и вернёт замечания. "
+            "Код изменений уйдёт выбранному провайдеру — это тратит токены. "
+            "Ревьюер файлы не правит: он работает в режиме «только чтение».",
+            wrap=True,
+        ))
+
+        row_project = QHBoxLayout()
+        row_project.addWidget(QLabel("Папка проекта:   "))
+        self.project = QLineEdit()
+        self.project.setPlaceholderText("папка с кодом, где есть .git")
+        self.btn_pick_project = QPushButton("Выбрать…")
+        self.btn_pick_project.clicked.connect(self._pick_project)
+        row_project.addWidget(self.project, 1)
+        row_project.addWidget(self.btn_pick_project)
+        box.addLayout(row_project)
+
+        row_base = QHBoxLayout()
+        row_base.addWidget(QLabel("С чем сравнивать:   "))
+        self.base = QLineEdit()
+        self.base.setPlaceholderText("пусто — рабочее дерево против индекса (git diff)")
+        row_base.addWidget(self.base, 1)
+        box.addLayout(row_base)
+        box.addWidget(ui.label(
+            "Ветку, тег или коммит можно указать вручную: например `main` — "
+            "тогда видно всё, что сделано в текущей ветке поверх main.",
+            kind="dim", wrap=True,
+        ))
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Проверить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _pick_project(self) -> None:
+        start = self.project.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Папка проекта", start if Path(start).is_dir() else str(Path.home())
+        )
+        if chosen:
+            self.project.setText(chosen)
+
+    def values(self) -> dict:
+        """Выбор человека: папка проекта и база сравнения."""
+        return {
+            "project": self.project.text().strip(),
+            "base": self.base.text().strip(),
+        }
+
+    def _accept(self) -> None:
+        values = self.values()
+        if not values["project"]:
+            self.status.setText("Не выбрана папка проекта.")
+            return
+        folder = Path(values["project"])
+        if not folder.is_dir():
+            self.status.setText("Такой папки нет: " + values["project"])
+            return
+        if not (folder / ".git").exists():
+            self.status.setText(
+                "Это не git-репозиторий: ревьюеру нужен `git diff`. "
+                "Проверь папку проекта."
+            )
+            return
+        self.accept()
+
+
+class QwenReplyDialog(QDialog):
+    """Возражение основного агента для раунда спора.
+
+    Текст пишет человек (или основной агент передаёт его сюда): ревьюер
+    отвечает на доводы, и так до предела раундов. За пределом программа
+    не спорит сама — решение остаётся за человеком.
+    """
+
+    def __init__(self, round_no: int, limit: int, project: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Qwen Code: возражение в споре")
+        self.setMinimumWidth(760)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            f"Раунд {round_no} из {limit}. Возражение уйдёт ревьюеру вместе с "
+            "ходом спора: он либо согласится, либо объяснит, почему возражение "
+            "неверно. Файлы по-прежнему никто не правит.",
+            wrap=True,
+        ))
+        self.project = QLineEdit(project)
+        self.project.setReadOnly(True)
+        box.addWidget(self.project)
+        self.reply = QPlainTextEdit()
+        self.reply.setPlaceholderText(
+            "Что возразить ревьюеру: почему его замечание не подходит — "
+            "с обоснованием (например: «так задумано, потому что…»)"
+        )
+        self.reply.setMinimumHeight(160)
+        box.addWidget(self.reply)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Отправить возражение")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def values(self) -> str:
+        """Текст возражения."""
+        return self.reply.toPlainText().strip()
+
+    def _accept(self) -> None:
+        if not self.values():
+            self.status.setText("Пустое возражение отправлять нечего.")
+            return
+        self.accept()
+
+
 class GreenlightScanDialog(QDialog):
     """Что проверять greenlight: папка iOS-проекта и, если есть, собранный .ipa.
 
@@ -3177,13 +3327,14 @@ class CapsTab(ScrollPage):
         "voice": "Команда /голос — говорить в микрофон",
         "pc": "Мост ПК — файлы, программы, скриншоты (всё через спрос)",
         "ncp": "Мост NCP — память, библиотека, 7 инструментов",
-        "agents": "12 агентов — поиск, план, код, проверка и другие",
+        "agents": "13 агентов — поиск, план, код, проверка и другие",
         "antiblock": "Обход блокировок — запуск OpenCode через прокси, пул обновляется сам",
         "rtk": "rtk — вывод команд короче (нужен rtk в PATH)",
         "caveman": "caveman — ответы короче (правила в AGENTS.md)",
         "pxpipe": "pxpipe — запросы картинками (локальный прокси)",
         "auto-improve": "auto-improve — улучшение текста (цикл с судьёй)",
         "greenlight": "greenlight — проверка iOS-приложения перед App Store",
+        "qwen-review": "Qwen Code — второй ревьюер (вторая пара глаз)",
     }
 
     def __init__(self, parent=None) -> None:
@@ -3269,6 +3420,18 @@ class CapsTab(ScrollPage):
                     "когда галочка отмечена"
                 )
                 box.toggled.connect(self._gl_toggled)
+            if name == "qwen-review":
+                box.setToolTip(
+                    "Второй ревьюер: сторонний консольный агент Qwen Code "
+                    "(автор QwenLM, Apache-2.0). После работы основного "
+                    "агента он читает `git diff` изменений и приносит "
+                    "замечания — свежий взгляд второй модели. Модель "
+                    "выбирается из провайдеров, уже подключённых в "
+                    "opencode. Ревьюер файлы не правит и идёт в режиме "
+                    "«только чтение». Это тратит токены: каждая проверка — "
+                    "запрос. Отдельный режим «спор» по умолчанию выключен"
+                )
+                box.toggled.connect(self._qw_toggled)
             what_layout.addWidget(box)
             self.checks[name] = box
         # Уровень caveman — единственная возможность с выбором внутри
@@ -3463,6 +3626,99 @@ class CapsTab(ScrollPage):
         row_gl_btns.addStretch(1)
         gl_layout.addLayout(row_gl_btns)
         what_layout.addWidget(box_gl)
+        # --- qwen-review: второй ревьюер. Не только галочка: сначала
+        # развёртывание Qwen Code, потом выбор модели из провайдеров
+        # opencode, и лишь затем проверка изменений — а «спор» отдельно.
+        box_qw = QGroupBox("Qwen Code — второй ревьюер (вторая пара глаз)")
+        qw_layout = QVBoxLayout(box_qw)
+        qw_layout.addWidget(ui.label(
+            "Сторонний консольный агент Qwen Code (автор QwenLM, лицензия "
+            "Apache-2.0) в headless-режиме: читает `git diff` изменений и "
+            "приносит замечания второй моделью. Файлы он не правит — идёт в "
+            "режиме «только чтение». Модель выбирается из провайдеров, уже "
+            "подключённых в opencode; ключ передаётся только в окружение "
+            "запуска и в окно и журналы не попадает.",
+            kind="dim", wrap=True,
+        ))
+        row_qw_pick = QHBoxLayout()
+        row_qw_pick.addWidget(QLabel("Провайдер:   "))
+        self.qw_provider = QComboBox()
+        self.qw_provider.setMinimumWidth(200)
+        self.qw_provider.currentIndexChanged.connect(self._qw_provider_changed)
+        row_qw_pick.addWidget(self.qw_provider)
+        row_qw_pick.addWidget(QLabel("   Модель:   "))
+        self.qw_model = QComboBox()
+        self.qw_model.setMinimumWidth(220)
+        row_qw_pick.addWidget(self.qw_model, 1)
+        self.btn_qw_save = QPushButton("Сохранить выбор")
+        self.btn_qw_save.setToolTip(
+            "Запоминает провайдера и модель: программа пишет их в настройки "
+            "Qwen Code в своей папке (личный ~/.qwen не трогается). Ключ "
+            "провайдера сюда не записывается — он уезжает в окружение "
+            "процесса при запуске"
+        )
+        row_qw_pick.addWidget(self.btn_qw_save)
+        qw_layout.addLayout(row_qw_pick)
+        self.qw_hint = ui.label("", kind="dim", wrap=True)
+        qw_layout.addWidget(self.qw_hint)
+        row_qw_btns = QHBoxLayout()
+        self.btn_qw_check = QPushButton("Проверить окружение")
+        self.btn_qw_check.setToolTip(
+            "Проверка без запуска: отвечает ли qwen, есть ли Node.js нужной "
+            "версии, выбран ли провайдер и модель. Ничего не меняет и никуда "
+            "не звонит"
+        )
+        self.btn_qw_deploy = QPushButton("Развернуть Qwen Code")
+        self.btn_qw_deploy.setToolTip(
+            "Ставит Qwen Code в свою папку рядом с настройками той же "
+            "командой npm, что в README автора, только без -g. Node.js "
+            "программа не ставит: если его нет, скажет прямо. Нужен интернет"
+        )
+        self.btn_qw_run = QPushButton("Проверить изменения…")
+        self.btn_qw_run.setToolTip(
+            "Берёт `git diff` проекта и отдаёт его ревьюеру. Раунды спора "
+            "начинаются с этого же нажатия. Кнопка доступна только при "
+            "отмеченной галочке qwen-review"
+        )
+        for button in (self.btn_qw_check, self.btn_qw_deploy, self.btn_qw_run):
+            row_qw_btns.addWidget(button)
+        row_qw_btns.addStretch(1)
+        qw_layout.addLayout(row_qw_btns)
+        self.qw_debate = QCheckBox("спор — ревьюер и основная модель спорят до предела раундов")
+        self.qw_debate.setToolTip(
+            "Отдельный режим, по умолчанию выключен. Ревьюер присылает "
+            "замечания, основной агент возражает с обоснованием, ревьюер "
+            "отвечает — и так не больше заданного числа раундов. Если "
+            "согласия нет, программа не решает сама: она показывает оба "
+            "довода и спорный фрагмент, а решает человек"
+        )
+        row_qw_debate = QHBoxLayout()
+        row_qw_debate.addWidget(self.qw_debate)
+        row_qw_debate.addWidget(QLabel("   раундов:   "))
+        self.qw_rounds = QSpinBox()
+        self.qw_rounds.setRange(1, qwen_review.MAX_ROUNDS)
+        self.qw_rounds.setValue(qwen_review.DEFAULT_ROUNDS)
+        self.qw_rounds.setToolTip(
+            "Сколько раундов спора разрешено. Больше — больше токенов; "
+            "предел задан автором режима, поднимать его выше пяти не даём"
+        )
+        row_qw_debate.addWidget(self.qw_rounds)
+        self.btn_qw_reply = QPushButton("Возразить и продолжить…")
+        self.btn_qw_reply.setToolTip(
+            "Следующий раунд спора: возражение с обоснованием уходит "
+            "ревьюеру вместе с ходом спора. Работает только при включённом "
+            "«споре»"
+        )
+        self.btn_qw_forget = QPushButton("Забыть ход спора")
+        self.btn_qw_forget.setToolTip(
+            "Сбрасывает счёт раундов и доводы: следующий запуск начнётся "
+            "заново. Ни файлы проекта, ни настройки не трогает"
+        )
+        row_qw_debate.addWidget(self.btn_qw_reply)
+        row_qw_debate.addWidget(self.btn_qw_forget)
+        row_qw_debate.addStretch(1)
+        qw_layout.addLayout(row_qw_debate)
+        what_layout.addWidget(box_qw)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -3879,6 +4135,13 @@ class CapsTab(ScrollPage):
         self.btn_gl_dry.clicked.connect(self._gl_dry)
         self.btn_gl_cloud.clicked.connect(self._gl_cloud)
         self.btn_gl_report.clicked.connect(self._gl_report)
+        self.btn_qw_check.clicked.connect(self._qw_check)
+        self.btn_qw_deploy.clicked.connect(self._qw_deploy)
+        self.btn_qw_save.clicked.connect(self._qw_save)
+        self.btn_qw_run.clicked.connect(self._qw_run)
+        self.btn_qw_reply.clicked.connect(self._qw_reply)
+        self.btn_qw_forget.clicked.connect(self._qw_forget)
+        self.qw_debate.toggled.connect(self._qw_debate_toggled)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -3890,6 +4153,9 @@ class CapsTab(ScrollPage):
         # Кнопки greenlight — по галочке greenlight: по умолчанию сканер
         # выключен и ничего не запускается.
         self._gl_toggled(self.checks["greenlight"].isChecked())
+        # Второй ревьюер: по умолчанию выключен, «спор» — тоже.
+        self._qw_toggled(self.checks["qwen-review"].isChecked())
+        self._qw_debate_toggled(False)
         self._refresh()
 
         outer.activate()
@@ -5054,15 +5320,36 @@ class CapsTab(ScrollPage):
             gl = {}
         if gl:
             if gl.get("ready"):
-                notes.append("greenlight: " + greenlight.status_text(dest))
+                notes.append(f"greenlight: готов, {gl.get('version')}.")
             else:
-                notes.append(
-                    "greenlight: не готов — " + "; ".join(gl.get("missing") or []) + "."
-                )
+                reason = "не собран" if not gl.get("binary") else "не отвечает"
+                where = ("Go не найден — собрать нечем." if not gl.get("go")
+                         else "Go найден: кнопка «Собрать greenlight».")
+                notes.append(f"greenlight: {reason}. {where}")
             self.gl_hint.setText(greenlight.status_text(dest))
             self.btn_gl_run.setEnabled(bool(self.checks["greenlight"].isChecked()))
             self.btn_gl_dry.setEnabled(bool(self.checks["greenlight"].isChecked()))
             self.btn_gl_cloud.setEnabled(bool(self.checks["greenlight"].isChecked()))
+        # Строка про второго ревьюера: без развёрнутого qwen и выбранной
+        # модели проверка не пойдёт — сказать об этом до нажатия.
+        try:
+            qw = qwen_review.check(dest)
+        except Exception:
+            qw = {}
+        if qw:
+            if qw.get("ready"):
+                notes.append(f"Qwen Code: ревьюер готов, {qw.get('version')}.")
+            else:
+                selection = qw.get("selection") or {}
+                if not qw.get("binary"):
+                    notes.append("Qwen Code: не развёрнут — кнопка «Развернуть Qwen Code».")
+                elif not selection.get("model"):
+                    notes.append("Qwen Code: модель ревьюера не выбрана.")
+                else:
+                    notes.append("Qwen Code: ревьюер не готов — " + "; ".join(
+                        (qw.get("missing") or ["смотри строку ниже"])[:1]) + ".")
+            self.btn_qw_run.setEnabled(bool(self.checks["qwen-review"].isChecked()))
+            self._qw_fill_providers(dest)
         # Список источников для pxpipe: читаем здесь, в главном потоке.
         try:
             choices = pxpipe.provider_choices(dest)
@@ -5503,6 +5790,261 @@ class CapsTab(ScrollPage):
             if files else f"Отчётов пока нет — папка открыта: {folder}.",
             "info",
         )
+
+    def _qw_toggled(self, on: bool) -> None:
+        """Галочка qwen-review разрешает проверку изменений и спор.
+
+        Сама галочка ничего не запускает: она лишь открывает кнопки. Режим
+        «спор» — отдельный переключатель, и он тоже выключен по умолчанию.
+        """
+        for name in ("btn_qw_run", "qw_debate", "qw_rounds", "btn_qw_forget"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(bool(on))
+        if not on:
+            box = getattr(self, "qw_debate", None)
+            if box is not None and box.isChecked():
+                box.blockSignals(True)
+                box.setChecked(False)
+                box.blockSignals(False)
+            self._qw_debate_toggled(False)
+        else:
+            self.log.add(
+                "Qwen Code — второй ревьюер отмечен. Ревьюер файлы не правит, "
+                "но код изменений уходит выбранному провайдеру. "
+                + qwen_review.COST_WARNING,
+                "warn",
+            )
+            self._qw_debate_toggled(self.qw_debate.isChecked())
+
+    def _qw_debate_toggled(self, on: bool) -> None:
+        """«Спор» — отдельный выключатель: без него раундов не будет."""
+        button = getattr(self, "btn_qw_reply", None)
+        if button is not None:
+            enabled = bool(on) and bool(self.checks.get("qwen-review") is not None
+                                        and self.checks["qwen-review"].isChecked())
+            button.setEnabled(enabled)
+        if on:
+            self.log.add(qwen_review.DEBATE_WARNING, "warn")
+
+    def _qw_dest(self) -> Path | None:
+        """Папка настроек для кнопок ревьюера. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _qw_fill_providers(self, dest: Path) -> None:
+        """Заполняет списки провайдеров и моделей из настроек opencode.
+
+        Читается здесь, в главном потоке. Провайдеры не в формате OpenAI не
+        прячутся молча: они перечисляются в подсказке с причиной — «не
+        подходит», а не «пропал».
+        """
+        try:
+            found = qwen_review.providers(dest)
+        except Exception:  # noqa: BLE001 — чужие настройки не должны ронять окно
+            found = []
+        fitting = [item for item in found if item.get("ok")]
+        selection = qwen_review.chosen(dest)
+        want_provider = self.qw_provider.currentData() or selection.get("provider")
+        want_model = self.qw_model.currentData() or selection.get("model")
+
+        self.qw_provider.blockSignals(True)
+        self.qw_provider.clear()
+        for item in fitting:
+            self.qw_provider.addItem(str(item["id"]), str(item["id"]))
+        index = self.qw_provider.findData(want_provider)
+        if index >= 0:
+            self.qw_provider.setCurrentIndex(index)
+        self.qw_provider.blockSignals(False)
+        self._qw_fill_models(want_model)
+
+        unfitting = [item for item in found if not item.get("ok")]
+        parts: list[str] = []
+        if not found:
+            parts.append(
+                "В настройках opencode пока нет провайдеров — сначала "
+                "подключи провайдера (например OmniRoute или мост LMArena)."
+            )
+        elif not fitting:
+            parts.append("Ни один провайдер opencode для ревьюера не подходит:")
+        for item in unfitting[:4]:
+            parts.append(f"«{item['id']}» — {item['why']}")
+        if selection.get("model"):
+            parts.append(
+                f"Сейчас выбран: {selection.get('provider')} / {selection.get('model')}."
+            )
+        self.qw_hint.setText(" ".join(parts))
+
+    def _qw_fill_models(self, want: str = "") -> None:
+        """Список моделей выбранного провайдера — имена не выдумываются."""
+        provider_id = str(self.qw_provider.currentData() or "")
+        models: list[str] = []
+        try:
+            found = qwen_review.providers(self._dest() or Path("."))
+        except Exception:  # noqa: BLE001
+            found = []
+        for item in found:
+            if item["id"] == provider_id:
+                models = list(item.get("models") or [])
+                if not item.get("ok"):
+                    models = []
+        self.qw_model.clear()
+        for name in models:
+            self.qw_model.addItem(name, name)
+        index = self.qw_model.findData(want)
+        if index >= 0:
+            self.qw_model.setCurrentIndex(index)
+
+    def _qw_provider_changed(self) -> None:
+        """Сменился провайдер — перечитать его модели."""
+        self._qw_fill_models()
+
+    def _qw_check(self) -> None:
+        """Живая проверка окружения ревьюера. Ничего не меняет."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            data = qwen_review.check(dest)
+            line = ("Живая проверка: " if data.get("binary_ok") else "Живая проверка не прошла: ")
+            text = qwen_review.status_text(dest)
+            if data.get("ready"):
+                return [line + text], []
+            return [line + text], list(data.get("missing") or []) or [text]
+
+        self._start(job, "Qwen Code")
+
+    def _qw_deploy(self) -> None:
+        """Разворачивает Qwen Code в нашу папку тем же npm, что у автора."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+        if not qwen_review.find_npm():
+            self._warn(
+                "npm не найден: он ставится вместе с Node.js. "
+                + qwen_review.INSTALL_HINT
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Развернуть Qwen Code",
+            "Поставить Qwen Code в свою папку рядом с настройками?\n\n"
+            "Команда та же, что в README автора, только без -g и в наши "
+            "данные. Нужны Node.js 22 или новее и интернет: npm скачает "
+            "пакет. Личный ~/.qwen и чужие папки программа не трогает.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def job(progress):
+            return qwen_review.deploy(dest, progress=progress)
+
+        self._start(job, "Qwen Code")
+
+    def _qw_save(self) -> None:
+        """Запоминает провайдера и модель для ревьюера."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+        provider = str(self.qw_provider.currentData() or "")
+        model = str(self.qw_model.currentData() or "")
+        if not provider or not model:
+            self._warn(
+                "Не выбран провайдер и модель ревьюера. Если провайдеров нет — "
+                "сначала подключи провайдера в opencode."
+            )
+            return
+
+        def job(progress):
+            return qwen_review.choose(dest, provider, model, progress=progress)
+
+        self._start(job, "Qwen Code")
+
+    def _qw_run(self) -> None:
+        """Проверяет изменения вторым ревьюером. Только чтение."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+        if not self.checks["qwen-review"].isChecked():
+            self._warn(
+                "Сначала отметь галочку «Qwen Code — второй ревьюер»: "
+                "по умолчанию ревьюер выключен."
+            )
+            return
+        dialog = QwenReviewDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        rounds = int(self.qw_rounds.value())
+        if self.qw_debate.isChecked():
+            answer = QMessageBox.question(
+                self, "Ревьюер и спор",
+                qwen_review.COST_WARNING + "\n\n" + qwen_review.DEBATE_WARNING
+                + f"\n\nРаундов разрешено: {rounds}. Продолжить?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        def job(progress):
+            return qwen_review.review(
+                dest, Path(values["project"]), values["base"],
+                rounds=rounds, progress=progress,
+            )
+
+        self._start(job, "Qwen Code")
+
+    def _qw_reply(self) -> None:
+        """Следующий раунд спора: возражение уходит ревьюеру."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+        if not (self.checks["qwen-review"].isChecked() and self.qw_debate.isChecked()):
+            self._warn(
+                "Спор выключен: отметь галочку qwen-review и переключатель "
+                "«спор», иначе раундов не будет."
+            )
+            return
+        state = qwen_review.debate_state(dest)
+        if not state.get("transcript"):
+            self._warn(
+                "Спора пока не было: сначала нажми «Проверить изменения…» — "
+                "первое ревью и есть первый раунд."
+            )
+            return
+        limit = int(self.qw_rounds.value())
+        dialog = QwenReplyDialog(
+            int(state.get("round") or 0) + 1, limit, str(state.get("project") or ""), self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        reply = dialog.values()
+        project = str(state.get("project") or "")
+        base = str(state.get("base") or "")
+
+        def job(progress):
+            return qwen_review.review(
+                dest, Path(project), base, reply=reply, rounds=limit,
+                progress=progress,
+            )
+
+        self._start(job, "Qwen Code")
+
+    def _qw_forget(self) -> None:
+        """Забывает ход спора: счёт раундов начнётся заново."""
+        dest = self._qw_dest()
+        if dest is None:
+            return
+        if not self.checks["qwen-review"].isChecked():
+            self._warn("Сначала отметь галочку «Qwen Code — второй ревьюер».")
+            return
+
+        def job(progress):
+            return qwen_review.clear_debate(dest)
+
+        self._start(job, "Qwen Code")
 
     def _px_confirm(self) -> bool:
         """Спрашивает согласие на сжатие запросов картинками.

@@ -42,6 +42,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 #: Откуда взят скрипт и по какому коммиту сверялись его байты.
 SOURCE = "https://github.com/crimeacs/auto-improve"
@@ -505,6 +507,12 @@ def _environment(dest: Path) -> tuple[dict, str]:
     env["IMPROVE_EVENTS_LOG"] = str(events_file(dest))
     env["IMPROVE_MUTATOR"] = os.environ.get("IMPROVE_MUTATOR", DEFAULT_MUTATOR)
     env["IMPROVE_EVALUATOR"] = os.environ.get("IMPROVE_EVALUATOR", DEFAULT_EVALUATOR)
+    # Дочерний Python обязан печатать в UTF-8: иначе на Windows его stdout
+    # в пайпе идёт в cp1251, и русские теги превращаются в «???» и у нас,
+    # и в окне программы. Найдено живьём: history("нет-такого") возвращал
+    # "No results for ..." с кракозябрами вместо тега.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env, value
 
 
