@@ -26,11 +26,8 @@ set "PYW="
 rem 1. Окружение, которое ставит сама программа.
 call :try_dir "%USERPROFILE%\.workbuddy-ai\binaries\python\envs\dbapp\Scripts"
 
-rem 2. Другие окружения рядом с профилем. Уже проверенные выше
-rem повторно не трогаем: иначе поиск ходит по кругу.
-if not "%PYW%"=="" goto :skip_envs
+rem 2. Любые другие окружения рядом с профилем.
 for /d %%D in ("%USERPROFILE%\.workbuddy-ai\binaries\python\envs\*") do call :try_dir "%%~fD\Scripts"
-:skip_envs
 
 rem 3. Python, установленный в систему обычным установщиком.
 for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python*") do call :try_dir "%%~fD"
@@ -69,11 +66,7 @@ if not "%SHORT%"=="%CAND%" exit /b
 "%CAND%" -c "import PyQt6" >nul 2>&1
 if errorlevel 1 exit /b
 set "PYW=%CAND%"
-rem Оконный pythonw ищем РЯДОМ с тем Python, который нашёлся:
-rem %~dp1 — это папка самого .cmd, а не папка питона, и потому
-rem проверка была всегда ложной: рядом с ярлыком pythonw нет.
-for %%I in ("%CAND%") do set "CANDDIR=%%~dpI"
-if exist "%CANDDIR%pythonw.exe" set "PYW=%CANDDIR%pythonw.exe"
+if exist "%~dp1pythonw.exe" set "PYW=%~dp1pythonw.exe"
 exit /b
 
 :nopython
