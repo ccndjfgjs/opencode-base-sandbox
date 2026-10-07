@@ -4355,6 +4355,51 @@ def main() -> int:
             check("секрет-42" not in _db_note3,
                   f"в сообщении об отказе пароля нет: {_db_note3}")
 
+            # Три случая из определения готовности: подключение без пароля,
+            # нет Node.js, нет npx. Ни один из них не повод молчать и не
+            # повод писать что-то в настройки.
+            import os as _os  # noqa: PLC0415 — нужен здесь и только здесь
+            import subprocess as _sp  # noqa: PLC0415 — нужен здесь и только здесь
+
+            _db_nopw = _db_tmp / "без-пароля"
+            _db_nopw.mkdir()
+            _db_m5, _db_e5 = _dbhub.add_source(
+                _db_nopw, "filebase", "sqlite",
+                "sqlite:///" + str(_db_nopw / "base.db"))
+            _db_nopw_toml = _db_nopw / "mcp-dbhub.toml"
+            _db_nopw_text = (_db_nopw_toml.read_text(encoding="utf-8")
+                             if _db_nopw_toml.is_file() else "")
+            _db_nopw_dsn = next((ln for ln in _db_nopw_text.splitlines()
+                                 if ln.startswith("dsn")), "")
+            check(not _db_e5 and not list(_db_nopw.glob("*password.txt")),
+                  "подключение без пароля не рождает файл пароля")
+            check("${" not in _db_nopw_dsn,
+                  f"и не оставляет неразрешённую переменную: {_db_nopw_dsn}")
+
+            # Node.js не установлен. Имя программы заведомо несуществующее:
+            # проверяем движок требований, а не машину, на которой идёт
+            # самопроверка. «Не найден» — это и есть честный ответ, а не
+            # зелёная галочка.
+            _db_no_node = _mcp_registry.check_requirement({
+                "what": "Node.js", "type": "command",
+                "check": "нет-такого-node-xyz", "args": ["--version"],
+                "min_version": 22})
+            check(_db_no_node.ok is False and bool(_db_no_node.detail),
+                  f"без Node.js требование не зелёное: {_db_no_node.detail}")
+
+            # npx не нашёлся — лаунчер отказывается словами и молчит в
+            # stdout: там у моста протокол, лишний текст его ломает.
+            _db_npx = _sp.run(
+                [sys.executable, str(_db_launcher)],
+                env=dict(_os.environ, PATH="нет-такой-папки",
+                         OPENCODE_CONFIG_DIR=str(_db_tmp)),
+                capture_output=True, text=True, timeout=60)
+            _db_npx_last = _db_npx.stderr.strip().splitlines()[-1] if _db_npx.stderr.strip() else ""
+            check(_db_npx.returncode != 0 and not _db_npx.stdout.strip(),
+                  "без npx лаунчер уходит с ошибкой и молчит в stdout")
+            check("Node.js" in _db_npx.stderr,
+                  f"и называет причину: {_db_npx_last}")
+
             # Живая проверка не прошла — в настройки не пишется ничего.
             _db_empty = _db_tmp / "пустая-папка"
             _db_empty.mkdir()
