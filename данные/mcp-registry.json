@@ -16,13 +16,14 @@
         "official_url": "https://nodejs.org/",
         "hand_over": false,
         "publisher_trusted": true,
-        "instructions": "Требуют четверо серверов из девяти: windows-admin, excel, obs и dbhub — их мосты запускаются через Node.js. Самому dbhub нужен Node.js 22.5 или новее, остальным хватает 18. Ставится одной кнопкой, бесплатно, без аккаунта. Берётся LTS, а не текущая ветка: в каталоге рядом лежит OpenJS.NodeJS версии 26.7.0, то есть скачок через два мажора, а мостам нужен рантайм. На этой машине стоит v24.18.0 в C:\\Program Files\\nodejs, каталог предлагает 24.19.0 — обычное обновление вперёд. Внимание на Windows: npx лежит как npx.ps1, а PowerShell может блокировать запуск .ps1 политикой выполнения; код это обходит, пробуя npx.cmd.",
+        "instructions": "Требуют пятеро серверов из десяти: windows-admin, excel, obs, dbhub и browsers — их мосты запускаются через Node.js. Самому dbhub нужен Node.js 22.5 или новее, browsers и остальным хватает 18. Ставится одной кнопкой, бесплатно, без аккаунта. Берётся LTS, а не текущая ветка: в каталоге рядом лежит OpenJS.NodeJS версии 26.7.0, то есть скачок через два мажора, а мостам нужен рантайм. На этой машине стоит v24.18.0 в C:\\Program Files\\nodejs, каталог предлагает 24.19.0 — обычное обновление вперёд. Внимание на Windows: npx лежит как npx.ps1, а PowerShell может блокировать запуск .ps1 политикой выполнения; код это обходит, пробуя npx.cmd.",
         "checked": "2026-10-03",
         "required_by": [
           "windows-admin",
           "excel",
           "obs",
-          "dbhub"
+          "dbhub",
+          "browsers"
         ]
       },
       {
@@ -827,6 +828,96 @@
       "ready_here": false,
       "ready_here_note": "07.10.2026 живая проверка пройдена на Linux (песочница), база SQLite: DBHub 1.4.0 скачался через npx, протокол 2025-06-18 отвечает, список таблиц получен, INSERT отклонён режимом «только чтение». Windows и настоящая чужая база не проверялись — поэтому готовность выключена, а не «работает».",
       "verdict": "Работает без установки: сервер скачивает npx, подключения и пароли живут рядом с настройками. Кнопка «Включить» сначала проверяет соединение и только потом вписывает сервер в opencode"
+    },
+    {
+      "id": "browsers",
+      "name": "Браузеры (Chrome, Edge, Яндекс.Браузер, Firefox)",
+      "source": "https://github.com/microsoft/playwright-mcp",
+      "install": "Мост — лаунчер программы tools/dbapp/launchers/browsers_bridge_launcher.py. Сам сервер ставить не нужно: npx скачивает пакет @playwright/mcp при первом запуске и обновляет его сам. Что выбрано — браузер, профиль, окно — лежит в mcp-browsers.json рядом с настройками opencode. Проверено 07.10.2026: сервер отвечает по протоколу, инструментов 25.",
+      "program_install": {
+        "program": "",
+        "method": "none",
+        "winget_id": "",
+        "catalog_version": "",
+        "expected_publisher": "",
+        "expected_signer": "",
+        "signer_checked": "",
+        "needs_admin": false,
+        "needs_admin_verified": false,
+        "official_url": "https://github.com/microsoft/playwright-mcp",
+        "hand_over": false,
+        "publisher_trusted": true,
+        "bridge": "bundled",
+        "instructions": "Браузеры программа не ставит: Chrome, Edge и Яндекс.Браузер человек ставит сам. Chrome и Edge Playwright берёт по каналу (--browser chrome, --browser msedge) и ставить их не умеет. Скачивается по галочке только своя сборка Firefox для Playwright (около 90 МБ): к обычному Firefox подключиться нельзя, Playwright водит лишь свою сборку.",
+        "checked": "2026-10-07",
+        "installed_version": "",
+        "version_measured": "",
+        "bridge_checked": false,
+        "known_good": [],
+        "version_note": "Версию выбирает npx сам: @playwright/mcp@latest. На 07.10.2026 это 0.0.83 (внутри playwright 1.64.0-alpha). В самом пакете записано engines.node ≥ 18."
+      },
+      "connection": {
+        "kind": "local",
+        "command": [
+          "{DBAPP_PYTHON}",
+          "{PROGRAM}/tools/dbapp/launchers/browsers_bridge_launcher.py"
+        ],
+        "warm_up": true,
+        "note": "Браузер, профиль и режим окна в конфиг opencode не попадают: они лежат в mcp-browsers.json рядом с настройками, а лаунчер собирает из них аргументы. Запуск: npx -y @playwright/mcp@latest --browser chrome|msedge|firefox либо --executable-path <путь> (Яндекс.Браузер), --user-data-dir <профиль> либо --isolated, при желании --headless. Режим «мои сессии» — --extension: только Chrome и Edge и только с расширением Playwright. Проверено 07.10.2026: протокол 2025-06-18, инструментов 25."
+      },
+      "license": "Apache-2.0",
+      "tools_count": 25,
+      "why": "Нейросеть открывает страницы, читает их и нажимает кнопки в отдельном браузере, а не только в своей headless-копии. По умолчанию у неё свой профиль: личные вкладки и сессии не тронуты, а режим «мои сессии» включается только явным выбором. Chrome, Edge и Яндекс.Браузер — обычный Chromium, Firefox — своя сборка Playwright.",
+      "auth": "Паролей нет. Профиль нейросети лежит в cache/browsers рядом с настройками и в конфиг opencode не пишется. Режим «мои сессии» требует расширения Playwright в своём Chrome или Edge — расширение человек ставит сам, программа его не ставит.",
+      "opencode": "После включения нужен перезапуск opencode",
+      "requires": [
+        {
+          "what": "Node.js 18+",
+          "check": "node",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "min_version": 18,
+          "note": "в пакете @playwright/mcp записано engines.node ≥ 18. Проверка видит только старший номер: 18.0 она пропустит, а точную границу стерегут сами npm и npx"
+        },
+        {
+          "what": "npx",
+          "check": "npx",
+          "type": "command",
+          "args": [
+            "--version"
+          ],
+          "note": "сервер запускается через npx, отдельно ставить нечего"
+        },
+        {
+          "what": "браузер выбран",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "файл mcp-browsers.json рядом с настройками. Пока выбора нет, берётся Chrome — так написано в программе, а не в пакете"
+        },
+        {
+          "what": "браузер установлен",
+          "check": null,
+          "type": "manual",
+          "blocks": false,
+          "note": "Chrome и Edge берутся по каналу, Яндекс.Браузер — по пути к browser.exe. Проверяет это живая проверка: она открывает страницу, а не смотрит на файлы"
+        }
+      ],
+      "setup_steps": [
+        "Поставь Node.js 18+ — без него npx ничего не скачает. Он же нужен остальным мостам.",
+        "Выдели строку «Браузеры» и нажми «Выбрать браузер»: Chrome, Edge, Яндекс.Браузер или Firefox. Для Яндекса укажи путь к browser.exe.",
+        "Выбери профиль: отдельный (по умолчанию), без сохранения на диске или «мои сессии» через расширение Playwright.",
+        "Для Firefox поставь галочку «скачать сборку Playwright»: обычный Firefox не подойдёт, Playwright водит только свою сборку, около 90 МБ.",
+        "Нажми «Проверить браузер»: программа откроет страницу, прочитает заголовок и сохранит снимок. Пока проверка не прошла, сервер не включается.",
+        "Нажми «Настроить автоматически»: после удачной проверки сервер впишется в настройки opencode.",
+        "Перезапусти opencode — без перезапуска он нового сервера не увидит."
+      ],
+      "ready_here": false,
+      "ready_here_note": "07.10.2026 в песочнице проверена вся цепочка, кроме самого браузера: лаунчер запускает npx, настоящий @playwright/mcp 0.0.83 отвечает по протоколу 2025-06-18 и отдаёт 25 инструментов, а вызов browser_navigate честно отказывает: «Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome». Браузера в песочнице нет и поставить его нечем — поэтому готовность выключена, а не «работает».",
+      "verdict": "Работает без установки сервера: пакет скачивает npx. Chrome и Edge запускаются как есть, Яндекс.Браузер — по пути, Firefox требует разовой сборки Playwright. По умолчанию у нейросети отдельный профиль, а не ваши сессии",
+      "manual_setup": false
     }
   ],
   "excluded": [

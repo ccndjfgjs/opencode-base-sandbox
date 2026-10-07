@@ -20,12 +20,13 @@ if __package__ in (None, ""):
     import opencode_caps  # type: ignore[import-not-found]
     import android_studio  # type: ignore[import-not-found]
     import bridges  # type: ignore[import-not-found]
+    import browsers  # type: ignore[import-not-found]
     import dbhub  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
     from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   dbhub, program_cards, winget_install)
+                   browsers, dbhub, program_cards, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -2404,6 +2405,179 @@ class DbhubConnectionDialog(QDialog):
         self.accept()
 
 
+class BrowserChoiceDialog(QDialog):
+    """Окно выбора браузера для моста Playwright MCP.
+
+    Спрашиваем то, без чего мост не запустить: каким браузером водит
+    нейросеть, куда класть его профиль и показывать ли окно. Меню браузеров
+    у Playwright своё и не совпадает с тем, что стоит у человека: Chrome и
+    Edge берутся по каналу, Яндекс.Браузер — только по пути к browser.exe,
+    а Firefox — не тот, что стоит у человека, а своя сборка Playwright.
+    Про последнее окно говорит прямо, а не ставит галочку «Firefox»,
+    за которой ничего нет.
+
+    Выбор ложится файлом рядом с настройками opencode. В самих настройках
+    остаётся только команда лаунчера: смена браузера их не переписывает.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Браузер для нейросети")
+        self.setMinimumWidth(700)
+        self.choice = browsers.read_choice(self.dest)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Нейросеть будет открывать страницы в выбранном браузере. По "
+            "умолчанию у неё свой профиль, поэтому твои вкладки и входы в "
+            "своих аккаунтах она не увидит. Режим «мои сессии» — только "
+            "явным выбором и только с расширением Playwright.",
+            wrap=True,
+        ))
+
+        row_browser = QHBoxLayout()
+        row_browser.addWidget(ui.label("Браузер:", kind="title"))
+        self.browser_box = QComboBox()
+        for item in browsers.BROWSERS:
+            self.browser_box.addItem(item.title, item.key)
+        index = self.browser_box.findData(self.choice.browser)
+        if index >= 0:
+            self.browser_box.setCurrentIndex(index)
+        self.browser_box.currentIndexChanged.connect(self._refresh)
+        row_browser.addWidget(self.browser_box, 1)
+        box.addLayout(row_browser)
+
+        self.browser_hint = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.browser_hint)
+
+        row_path = QHBoxLayout()
+        row_path.addWidget(ui.label("Путь к browser.exe:", kind="title"))
+        self.path = QLineEdit(self.choice.executable)
+        self.path.setPlaceholderText(
+            "для Яндекс.Браузера: ...\\Yandex\\YandexBrowser\\Application\\browser.exe"
+        )
+        self.path.textChanged.connect(self._refresh)
+        row_path.addWidget(self.path, 1)
+        self.btn_browse = QPushButton("Обзор…")
+        self.btn_browse.clicked.connect(self._browse)
+        row_path.addWidget(self.btn_browse)
+        box.addLayout(row_path)
+
+        row_profile = QHBoxLayout()
+        row_profile.addWidget(ui.label("Профиль:", kind="title"))
+        self.profile_box = QComboBox()
+        for key, title in browsers.PROFILE_MODES:
+            self.profile_box.addItem(title, key)
+        index = self.profile_box.findData(self.choice.profile)
+        if index >= 0:
+            self.profile_box.setCurrentIndex(index)
+        self.profile_box.currentIndexChanged.connect(self._refresh)
+        row_profile.addWidget(self.profile_box, 1)
+        box.addLayout(row_profile)
+
+        self.headless = QCheckBox("Скрыть окно браузера — работать без него")
+        self.headless.setChecked(self.choice.headless)
+        self.headless.setToolTip(
+            "С окном видно, что делает нейросеть, и можно вмешаться. Без "
+            "окна работа идёт незаметно"
+        )
+        self.headless.stateChanged.connect(self._refresh)
+        box.addWidget(self.headless)
+
+        self.download = QCheckBox(
+            "Скачать сборку Firefox для Playwright, около 90 МБ"
+        )
+        self.download.setChecked(self.choice.download_firefox)
+        self.download.setToolTip(
+            "Твой Firefox не подойдёт: Playwright водит только свою сборку. "
+            "Скачивание идёт командой npx playwright install firefox"
+        )
+        box.addWidget(self.download)
+
+        self.command_hint = ui.label("", kind="dim", wrap=True)
+        box.addWidget(self.command_hint)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Записать")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        self._refresh()
+
+    def _current_key(self) -> str:
+        return str(self.browser_box.currentData() or "chrome")
+
+    def _current_profile(self) -> str:
+        return str(self.profile_box.currentData() or "separate")
+
+    def _build_choice(self) -> browsers.Choice:
+        return browsers.Choice(
+            browser=self._current_key(),
+            executable=self.path.text().strip(),
+            profile=self._current_profile(),
+            headless=self.headless.isChecked(),
+            download_firefox=self.download.isChecked(),
+            checked=self.choice.checked,
+        )
+
+    def _browse(self) -> None:
+        start = self.path.text().strip()
+        if not start:
+            found = browsers.installed_path(self._current_key())
+            start = str(found) if found else ""
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Где лежит browser.exe", start,
+            "Программы (*.exe);;Все файлы (*)",
+        )
+        if chosen:
+            self.path.setText(chosen)
+
+    def _refresh(self) -> None:
+        key = self._current_key()
+        item = browsers.browser(key)
+        profile = self._current_profile()
+        self.browser_hint.setText(
+            item.note + " " + browsers.hint(key, self._build_choice())
+        )
+        # Путь нужен только там, где браузер запускается по файлу. У
+        # остальных он бы только путал: Playwright их и так найдёт.
+        needs_path = item.kind == "path"
+        self.path.setEnabled(needs_path)
+        self.btn_browse.setEnabled(needs_path)
+        self.download.setEnabled(
+            item.kind == "playwright" and browsers.playwright_firefox_dir() is None
+        )
+        self.headless.setEnabled(profile != "sessions")
+        self.command_hint.setText(
+            "Запуск: " + " ".join(browsers.command(self.dest, self._build_choice()))
+            + ". Профиль: "
+            + str(browsers.profile_dir(self.dest, key))
+        )
+
+    def _save(self) -> None:
+        messages, errors = browsers.write_choice(self.dest, self._build_choice())
+        if errors:
+            # Окно не закрывается: человек должен видеть, что именно не так,
+            # и поправить это здесь же.
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
 class CapsTab(ScrollPage):
     """Возможности базы для opencode — установка по выбору.
 
@@ -2674,7 +2848,8 @@ class CapsTab(ScrollPage):
         self.btn_reg_auto.setToolTip(
             "Android Studio: поставить плагин из набора программы, включить "
             "сервер в студии, проверить его и вписать в настройки opencode. "
-            "DBHub: проверить связь с базой живым запросом и вписать сервер"
+            "DBHub: проверить связь с базой живым запросом и вписать сервер. "
+            "Браузеры: открыть страницу выбранным браузером и вписать сервер"
         )
         self.btn_reg_auto.setEnabled(False)
         self.btn_reg_off = QPushButton("Выключить")
@@ -2694,6 +2869,22 @@ class CapsTab(ScrollPage):
             "база. Ничего не записывает — только говорит, жива ли связь"
         )
         self.btn_db_check.setEnabled(False)
+        # Кнопки браузеров. Тоже живут только для своей строки: у
+        # остальных серверов выбирать нечего — они запускаются командой.
+        self.btn_br_choose = QPushButton("Выбрать браузер")
+        self.btn_br_choose.setToolTip(
+            "Браузеры: Chrome, Edge, Яндекс.Браузер или Firefox; профиль "
+            "нейросети и показывать ли окно. Выбор ляжет в mcp-browsers.json "
+            "рядом с настройками opencode"
+        )
+        self.btn_br_choose.setEnabled(False)
+        self.btn_br_check = QPushButton("Проверить браузер")
+        self.btn_br_check.setToolTip(
+            "Браузеры: поднять мост, открыть страницу и прочитать её "
+            "заголовок. Ничего не записывает — говорит, работает ли выбранный "
+            "браузер и видно ли страницу"
+        )
+        self.btn_br_check.setEnabled(False)
         row_mcp.addWidget(self.btn_reg_check)
         row_mcp.addWidget(self.btn_reg_on)
         row_mcp.addWidget(self.btn_reg_auto)
@@ -2701,6 +2892,8 @@ class CapsTab(ScrollPage):
         row_mcp.addWidget(self.btn_reg_src)
         row_mcp.addWidget(self.btn_db_add)
         row_mcp.addWidget(self.btn_db_check)
+        row_mcp.addWidget(self.btn_br_choose)
+        row_mcp.addWidget(self.btn_br_check)
         row_mcp.addStretch(1)
         mcp_layout.addLayout(row_mcp)
 
@@ -2745,6 +2938,8 @@ class CapsTab(ScrollPage):
         self.btn_reg_src.clicked.connect(self._reg_open_source)
         self.btn_db_add.clicked.connect(self._db_add_source)
         self.btn_db_check.clicked.connect(self._db_check)
+        self.btn_br_choose.clicked.connect(self._br_choose)
+        self.btn_br_check.clicked.connect(self._br_check)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
@@ -2808,21 +3003,22 @@ class CapsTab(ScrollPage):
         return mcp_registry.load_manual_config(dest, server.id) is not None
 
     # Серверы, которые программа умеет настроить целиком сама.
-    AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub")
+    AUTO_SERVERS = ("android-studio", "obs", "android-emulator", "dbhub",
+                    "browsers")
 
     def _reg_auto_possible(self, server: mcp_registry.Server | None) -> tuple[bool, str]:
         """Можно ли настроить автоматически и что этому мешает.
 
-        Автонастройка умеет ровно четыре вещи: Android Studio, OBS,
-        эмулятор Android и DBHub. Остальные серверы запускаются командой,
-        и «Настроить автоматически» для них был бы кнопкой вроде
+        Автонастройка умеет ровно пять вещей: Android Studio, OBS,
+        эмулятор Android, DBHub и браузеры. Остальные серверы запускаются
+        командой, и «Настроить автоматически» для них был бы кнопкой вроде
         работающей.
         """
         if server is None:
             return False, (
                 "Выберите строку в списке: автонастройка есть у Android "
-                "Studio, OBS, Android-эмулятора и DBHub. У LDPlayer она не "
-                "нужна — ему достаточно кнопки «Включить»."
+                "Studio, OBS, Android-эмулятора, DBHub и Браузеров. У LDPlayer "
+                "она не нужна — ему достаточно кнопки «Включить»."
             )
         if server.id not in self.AUTO_SERVERS:
             return False, (
@@ -2840,6 +3036,13 @@ class CapsTab(ScrollPage):
         """
         if server.installed:
             return "включён"
+        if server.id == "browsers":
+            # У браузеров до выбора нечего проверять: без файла выбора
+            # живая проверка возьмёт Chrome по умолчанию, а человек мог
+            # хотеть Яндекс.Браузер. Честнее сказать, что ждём выбора.
+            dest = self._reg_dest()
+            if dest is None or not browsers.config_path(dest).is_file():
+                return "нужно: выбрать браузер"
         if not server.requirements:
             return "не проверено"
         if not server.has_connection:
@@ -2962,6 +3165,11 @@ class CapsTab(ScrollPage):
         self.btn_db_check.setEnabled(
             is_db and bool(dbhub.read_sources(self._reg_dest() or Path()))
         )
+        # Кнопки браузеров — только у своей строки: у остальных серверов
+        # выбирать нечего, они запускаются командой.
+        is_br = server is not None and server.id == "browsers"
+        self.btn_br_choose.setEnabled(is_br)
+        self.btn_br_check.setEnabled(is_br)
         if is_db:
             sources = dbhub.read_sources(self._reg_dest() or Path())
             if sources:
@@ -2977,6 +3185,21 @@ class CapsTab(ScrollPage):
                     "Подключений к базам пока нет: у DBHub без них нечего "
                     "проверять и нечего включать. Начни с «Добавить подключение»."
                 )
+        elif is_br:
+            dest = self._reg_dest() or Path()
+            choice = browsers.read_choice(dest)
+            chosen = browsers.config_path(dest).is_file()
+            head = ("Выбрано: " + browsers.description(choice) + ". "
+                    if chosen else
+                    "Браузер ещё не выбран: пока не выберешь, проверять "
+                    "нечего. ")
+            self.reg_hint.setText(
+                head
+                + "«Проверить браузер» открывает страницу и читает заголовок — "
+                "это и есть доказательство, что браузер работает. «Настроить "
+                "автоматически» делает то же и вписывает сервер в настройки "
+                "opencode."
+            )
         else:
             self.reg_hint.clear()
         if server is None:
@@ -2988,6 +3211,18 @@ class CapsTab(ScrollPage):
         target = conn.get("url") or " ".join(conn.get("command") or [])
         if target:
             lines.append(f"Команда: {target}")
+        if server.id == "browsers":
+            # Что именно запустится — видно прямо здесь: браузер, профиль и
+            # окно живут в файле выбора, и без этой строки человек не понял
+            # бы, что уйдёт в npx.
+            dest = self._reg_dest() or Path()
+            choice = browsers.read_choice(dest)
+            br = browsers.browser(choice.browser)
+            lines.append("")
+            lines.append(f"Выбрано: {browsers.description(choice)}")
+            lines.append("Запуск: " + " ".join(browsers.command(dest, choice)))
+            lines.append(f"Профиль: {browsers.profile_dir(dest, br.key)}")
+            lines.append(browsers.hint(br.key, choice))
         if raw.get("why"):
             lines.append("")
             lines.append(str(raw["why"]))
@@ -3139,6 +3374,56 @@ class CapsTab(ScrollPage):
 
         self._start(job, "dbhub")
 
+    def _br_choose(self) -> None:
+        """Выбор браузера, профиля и окна для моста Playwright MCP.
+
+        Выбор ложится отдельным файлом рядом с настройками opencode, а не
+        в них самих: сменить браузер можно, не трогая настройки opencode.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "browsers":
+            self._warn("Выбирать браузер можно только у строки «Браузеры». "
+                       "Выберите её в списке.")
+            return
+
+        dialog = BrowserChoiceDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self._reg_show_detail()
+
+    def _br_check(self) -> None:
+        """Живая проверка браузера.
+
+        Поднимает мост и открывает страницу выбранным браузером: сервер
+        отвечает, страница открылась, заголовок прочитан. Ничего не
+        записывает — только говорит, работает ли выбранный браузер.
+        """
+        dest = self._reg_dest()
+        server = self._reg_current()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+            return
+        if server is None or server.id != "browsers":
+            self._warn("Проверять браузер можно только у строки «Браузеры». "
+                       "Выберите её в списке.")
+            return
+        if not browsers.config_path(dest).is_file():
+            self._warn("Браузер ещё не выбран. Нажми «Выбрать браузер», "
+                       "иначе проверять нечего.")
+            return
+        choice = browsers.read_choice(dest)
+
+        def job(progress):
+            return browsers.check_connection(dest, choice, progress=progress)
+
+        self._start(job, "browsers")
+
     def _reg_auto(self) -> None:
         """Настраивает сервер целиком, без конфигураций вручную.
 
@@ -3195,6 +3480,8 @@ class CapsTab(ScrollPage):
                     allow_install_path_fix=fix_install_path)
             if server.id == "dbhub":
                 return dbhub.auto_setup(dest, server, progress=progress)
+            if server.id == "browsers":
+                return browsers.auto_setup(dest, server, progress=progress)
             return bridges.auto_setup_emulator(dest, server, progress=progress)
 
         self._start(job, "registry")
