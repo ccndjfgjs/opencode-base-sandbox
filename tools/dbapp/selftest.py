@@ -6233,8 +6233,8 @@ def main() -> int:
         _tk_tab = window.caps_tab
         check({"rtk", "caveman"} <= set(_tk_tab.checks),
               f"на вкладке opencode обе галочки стоят: {sorted(_tk_tab.checks)}")
-        check(not _tk_tab.checks["rtk"].isChecked()
-              and not _tk_tab.checks["caveman"].isChecked(),
+        check(all(not _tk_tab.checks[name].isChecked()
+              for name in ("rtk", "caveman")),
               "и обе сняты по умолчанию — молча такое не включается")
         _tk_combo = [_tk_tab.caveman_level.itemData(i)
                      for i in range(_tk_tab.caveman_level.count())]
@@ -6712,6 +6712,367 @@ def main() -> int:
         else:
             _tk_os.environ["PXPIPE_PORT"] = _px_saved_port
         shutil.rmtree(_px_tmp, ignore_errors=True)
+
+    # ---- 8л. auto-improve: улучшение текста циклом с судьёй, не MCP. -------
+    # По §7 инструкции это не сервер: в mcp-registry.json его быть не должно.
+    # Цикл — чужая программа (скрипт автора crimeacs), она тратит токены и
+    # сама делает коммиты. Живого ключа судьи в проверке нет и быть не может:
+    # он принадлежит человеку. Поэтому проверяется наш код: отказы до записи,
+    # ключ никуда не утекает, команда собирается по README автора, а сам цикл
+    # прогоняется заглушкой, которая печатает и коммитит ровно то, что
+    # печатает и коммитит настоящий скрипт.
+    import os as _ai_os  # noqa: PLC0415
+    import subprocess as _ai_sp  # noqa: PLC0415
+    import auto_improve as _ai  # noqa: PLC0415 — рядом лежит, круга нет
+    import main as _ai_app  # noqa: PLC0415 — рядом лежит, круга нет
+
+    echo("\n--- 8л. auto-improve: улучшение текста циклом с судьёй ---")
+
+    _ai_root = core.program_root()
+    _ai_third = _ai_root / "tools" / "thirdparty" / "auto-improve"
+
+    # Копии автора: скрипт, лицензия и рубрики — байт в байт.
+    for _ai_rel, _ai_want in sorted(_ai.SCRIPT_BLOBS.items()):
+        _ai_path = _ai_third / _ai_rel
+        check(_ai_path.is_file(), f"auto-improve: копия на месте ({_ai_rel})")
+        if not _ai_path.is_file():
+            continue
+        check(_tk_blob(_ai_path) == _ai_want,
+              f"auto-improve: {_ai_rel} — байт в байт от автора "
+              f"(blob {_ai_want[:8]})")
+    _ai_script_text = (_ai_third / "improve.py").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("--artifact", "ключ файла из README автора"),
+        ("--criteria", "рубрика"),
+        ("--max-iterations", "ограничение итераций"),
+        ("improve/", "ветка улучшений"),
+        ("GEMINI_API_KEY", "ключ судьи из окружения"),
+        ("IMPROVE_EVALUATOR", "модель-судья"),
+    ):
+        check(_ai_bit in _ai_script_text,
+              f"auto-improve: в скрипте автора есть {_ai_why} ({_ai_bit})")
+
+    # Наш README: что взято и что не взято — сказано словами.
+    _ai_readme = (_ai_third / "README.md").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("crimeacs/auto-improve", "назван автор"),
+        ("только в отдельной ветке", "сказано про отдельную ветку"),
+        ("заявления автора", "числа автора названы заявлениями"),
+        ("независимо не проверены", "и что проверки нет"),
+        ("plot/", "сказано, что график на Rust не берём"),
+        ("voice/", "и что озвучку не берём"),
+        ("auto-improve-key.txt", "назван файл ключа"),
+        ("не MCP", "сказано, что это не MCP"),
+    ):
+        check(_ai_bit in _ai_readme, f"auto-improve: в README — {_ai_why}")
+
+    # Галочка, установка и уборка.
+    _ai_choices = {name for name, _title in opencode_caps.CAPS_CHOICES}
+    check("auto-improve" in _ai_choices
+          and "auto-improve" in {name for name, _t in opencode_caps.CAPS},
+          "галочка auto-improve есть и в списке вкладки, и в общем списке")
+    check("auto-improve" in opencode_caps.CAPS_OFF_BY_DEFAULT,
+          "галочка auto-improve снята по умолчанию: цикл тратит токены")
+    _ai_caps_src = (_ai_root / "tools" / "dbapp" / "opencode_caps.py").read_text(
+        encoding="utf-8")
+    for _ai_bit in ("_auto_improve_module", "_auto_improve_module().install",
+                    "_auto_improve_module().remove"):
+        check(_ai_bit in _ai_caps_src,
+              f"установка возможностей зовёт auto-improve своим модулем ({_ai_bit})")
+    _ai_main_src = (_ai_root / "tools" / "dbapp" / "main.py").read_text(encoding="utf-8")
+    for _ai_bit, _ai_why in (
+        ("Улучшить файл…", "кнопка запуска"),
+        ("Вписать ключ судьи", "кнопка ключа"),
+        ("Проверить окружение", "кнопка проверки"),
+        ("Показать ход", "кнопка истории"),
+        ("AutoImproveDialog", "окно выбора файла и рубрики"),
+        ("AutoImproveKeyDialog", "окно ключа"),
+        ("auto_improve.launch", "запуск цикла из окна"),
+    ):
+        check(_ai_bit in _ai_main_src, f"вкладка opencode: {_ai_why} ({_ai_bit})")
+
+    # Секретов и настоящих путей в новых файлах нет. Ключ в примерах не
+    # пишется целым: иначе проверка сама же его и находила бы.
+    _ai_files = (
+        _ai_root / "tools" / "dbapp" / "auto_improve.py",
+        _ai_third / "README.md",
+        _ai_root / "skills" / "auto-improve" / "SKILL.md",
+    )
+    _ai_leaks: list[str] = []
+    for _ai_item in _ai_files:
+        _ai_body = _ai_item.read_text(encoding="utf-8")
+        for _ai_mark in ("C:\\Users\\", "/home/", "/Users/", "AIza"):
+            if _ai_mark in _ai_body:
+                _ai_leaks.append(f"{_ai_item.name}: {_ai_mark}")
+    check(not _ai_leaks,
+          f"в файлах auto-improve нет секретов и настоящих путей: {_ai_leaks}")
+
+    # Не MCP: в реестре серверов его нет.
+    _ai_registry = json.loads(
+        core.program_file("mcp-registry.json").read_text(encoding="utf-8"))
+    _ai_ids = {str(s.get("id")) for s in _ai_registry.get("servers", [])}
+    check("auto-improve" not in _ai_ids,
+          "auto-improve не записан сервером MCP — это скрипт, а не сервер")
+
+    # Уведомления и правила базы знают про auto-improve.
+    _ai_notice = core.program_file("THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for _ai_bit in ("crimeacs/auto-improve", "af8bcdd4", "заявления автора",
+                    "auto-improve-key.txt"):
+        check(_ai_bit in _ai_notice,
+              f"THIRD-PARTY-NOTICES.md называет источник и оговорки: {_ai_bit}")
+    _ai_agents = (_ai_root / "config" / "AGENTS.md").read_text(encoding="utf-8")
+    check("auto-improve" in _ai_agents and "не MCP" in _ai_agents,
+          "config/AGENTS.md: про auto-improve сказано, и что это не MCP")
+
+    # ---- поведение: отказы, ключ и цикл — во временной папке.
+    _ai_tmp = Path(tempfile.mkdtemp(prefix="ai-caps-"))
+    _ai_dest: Path | None = None
+    _ai_saved_env = _ai_os.environ.get("OPENCODE_CONFIG_DIR")
+    _ai_saved_key = (_ai_os.environ.pop("GEMINI_API_KEY", None),
+                     _ai_os.environ.pop("GOOGLE_API_KEY", None))
+    try:
+        _ai_dest = _ai_tmp / "settings"
+        _ai_dest.mkdir()
+        _ai_os.environ["OPENCODE_CONFIG_DIR"] = str(_ai_dest)
+
+        # Без ключа судьи — ничего не пишется, и манифеста не появляется.
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(bool(_ai_e) and any("ключ судьи" in x for x in _ai_e),
+              f"без ключа установка отказывает: {_ai_e[:1]}")
+        check(not (_ai_dest / ".opencode-base-caps.json").exists(),
+              "и манифест ради отказа не заводится")
+        check(_ai.key_status(_ai_dest).startswith("ключ судьи не вписан"),
+              "состояние честно говорит, что ключа нет")
+
+        # Ключ: пустой и «обрезанный» не принимаются, настоящий ложится файлом.
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "   ")
+        check(bool(_ai_e), "пустой ключ не сохраняется")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "короткий")
+        check(bool(_ai_e), "слишком короткий ключ не сохраняется")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, "две строки\nвторая")
+        check(bool(_ai_e), "ключ с переносом строки не сохраняется")
+        check(not _ai.key_file(_ai_dest).exists(),
+              "после отказов файла ключа на диске нет")
+        _ai_sample_key = "AIza" + "z" * 33
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, _ai_sample_key)
+        check(not _ai_e and _ai.key_file(_ai_dest).is_file(),
+              f"ключ сохраняется файлом рядом с настройками: {_ai_e}")
+        check(_ai_sample_key not in " ".join(_ai_m),
+              "в сообщении о сохранении самого ключа нет")
+        if _ai_os.name != "nt":
+            _ai_mode = _ai.key_file(_ai_dest).stat().st_mode & 0o777
+            check(_ai_mode == 0o600,
+                  f"файл ключа закрыт до владельца: {oct(_ai_mode)}")
+        check(_ai.key_status(_ai_dest).endswith("(auto-improve-key.txt)"),
+              f"состояние говорит, откуда ключ: {_ai.key_status(_ai_dest)}")
+        check(_ai_os.environ.get("GEMINI_API_KEY") is None,
+              "программа не выставляет ключ в своё окружение — только в чужой процесс")
+
+        # С ключом установка проходит, повторная ничего не портит.
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(not _ai_e and _ai.installed(_ai_dest),
+              f"с ключом инструмент включается: {_ai_e}")
+        check(opencode_caps.caps_status(_ai_dest).get("auto-improve") is True,
+              "состояние вкладки видит включённый auto-improve")
+        _ai_manifest_before = (_ai_dest / ".opencode-base-caps.json").read_text(
+            encoding="utf-8")
+        _ai_m, _ai_e = _ai.install(_ai_dest)
+        check(not _ai_e
+              and (_ai_dest / ".opencode-base-caps.json").read_text(
+                  encoding="utf-8") == _ai_manifest_before,
+              "повторное включение манифест не переписывает")
+
+        # Команда запуска: ключи из README автора, а ключа судьи в ней нет.
+        _ai_cmd = _ai.build_command(
+            sys.executable, _ai_tmp / "файл.md", "тег", criteria="рубрика.md",
+            goal="цель", max_iterations=4, candidates=2, threshold=75, eval_runs=1)
+        for _ai_bit in ("--artifact", "--tag", "--max-iterations", "--candidates",
+                        "--threshold", "--eval-runs", "--criteria", "--goal"):
+            check(_ai_bit in _ai_cmd, f"в команде запуска есть {_ai_bit}")
+        check(all(_ai_sample_key not in part for part in _ai_cmd),
+              "ключа судьи в команде запуска нет")
+        _ai_env, _ai_value = _ai._environment(_ai_dest)
+        check(_ai_value == _ai_sample_key
+              and _ai_env.get("GEMINI_API_KEY") == _ai_sample_key,
+              "ключ уезжает в окружение процесса, а не в команду")
+        check(_ai_env.get("RESULTS_DIR", "").endswith("results")
+              and _ai_env.get("IMPROVE_EVENTS_LOG", "").endswith("events.jsonl"),
+              f"папки результатов и журнала задаются нами: "
+              f"{Path(_ai_env['RESULTS_DIR']).parent.name}")
+
+        # Файл вне git-репозитория — отказ с объяснением.
+        _ai_loose = _ai_tmp / "просто-файл.md"
+        _ai_loose.write_text("черновик\n", encoding="utf-8")
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_loose, "плохой-тег")
+        check(bool(_ai_e) and any("git-репозитор" in x for x in _ai_e),
+              f"файл вне репозитория не принимается: {_ai_e[:1]}")
+        check(not _ai.results_dir(_ai_dest).exists(),
+              "и папка результатов ради отказа не создаётся")
+
+        # Репозиторий: цикл прогоняется заглушкой, которая печатает и
+        # коммитит ровно то, что печатает и коммитит настоящий скрипт.
+        _ai_repo = _ai_tmp / "репозиторий"
+        _ai_repo.mkdir()
+        _ai_git = ["git", "-c", "user.name=проверка", "-c", "user.email=проверка@example"]
+        _ai_sp.run(["git", "init", "-q"], cwd=_ai_repo, timeout=60)
+        _ai_sp.run(_ai_git + ["commit", "-qm", "первый", "--allow-empty"],
+                   cwd=_ai_repo, timeout=60)
+        _ai_note = _ai_repo / "письмо.md"
+        _ai_note.write_text("# черновик\n\nСтрока, которую цикл переделает.\n",
+                            encoding="utf-8")
+        _ai_sp.run(["git", "add", "-A"], cwd=_ai_repo, timeout=60)
+        _ai_sp.run(_ai_git + ["commit", "-qm", "добавить файл"], cwd=_ai_repo, timeout=60)
+
+        # Тег: пустой и с пробелами не принимается — он же имя ветки.
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "плохой тег")
+        check(bool(_ai_e) and any("тег" in x for x in _ai_e),
+              f"тег с пробелом не принимается: {_ai_e[:1]}")
+
+        _ai_stub = _ai_tmp / "заглушка.py"
+        # Заглушка повторяет самое главное из поведения настоящего скрипта:
+        # сама создаёт ветку improve/<тег> от текущего состояния и коммитит
+        # в неё. Иначе проверка не поймала бы, что тег вообще доезжает.
+        _ai_stub.write_text(
+            "import subprocess, sys\n"
+            "tag = sys.argv[1]\n"
+            "print('[Baseline] Score: 48/100')\n"
+            "print('[Iter 1/1] Score: 48')\n"
+            "print('   [cand] exact  score=52 : правка')\n"
+            "print('[KEEP] pairwise: challenger won')\n"
+            "subprocess.run(['git', 'checkout', '-qb', 'improve/' + tag])\n"
+            "with open('письмо.md', 'a', encoding='utf-8') as f:\n"
+            "    f.write('правка цикла\\n')\n"
+            "subprocess.run(['git', 'add', '-A'])\n"
+            "subprocess.run(['git', '-c', 'user.name=заглушка',\n"
+            "                '-c', 'user.email=заглушка@example',\n"
+            "                'commit', '-qm', 'improve/' + tag + ' iter 1'])\n"
+            "print('[DONE] ' + tag + ': 48 -> 52 (delta: +4)')\n",
+            encoding="utf-8")
+        _ai_seen: list[str] = []
+        _ai_m, _ai_e = _ai.launch(
+            _ai_dest, _ai_note, "v1", criteria="", goal="письмо короче",
+            command=[sys.executable, str(_ai_stub), "v1"],
+            progress=_ai_seen.append)
+        check(not _ai_e, f"цикл прошёл без ошибок: {_ai_e}")
+        check(any("[KEEP]" in line for line in _ai_seen),
+              f"вывод цикла виден построчно: {_ai_seen[:3]}")
+        _ai_branch = _ai_sp.run(["git", "branch", "--show-current"], cwd=_ai_repo,
+                                capture_output=True, text=True, timeout=60).stdout.strip()
+        check(_ai_branch == "improve/v1",
+              f"цикл ушёл в ветку improve/<тег>, а основная осталась в стороне: "
+              f"сейчас {_ai_branch!r}")
+        _ai_log = _ai.log_file(_ai_dest).read_text(encoding="utf-8")
+        check("KEEP" in _ai_log and "DONE" in _ai_log,
+              "вывод цикла остаётся в журнале на диске")
+        check(_ai_sample_key not in _ai_log
+              and all(_ai_sample_key not in line for line in _ai_seen),
+              "ключа судьи нет ни в журнале, ни в выводе окна")
+        check(any("Ход — кнопкой «Показать ход»" in line for line in _ai_seen),
+              "после успеха программа говорит, где смотреть ход")
+
+        # Запуск без ключа: причина называется, и работа не начинается.
+        _ai.key_file(_ai_dest).unlink()
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "v2")
+        check(bool(_ai_e) and any("ключ судьи" in x for x in _ai_e),
+              f"без ключа цикл не запускается: {_ai_e[:1]}")
+        _ai_m, _ai_e = _ai.save_key(_ai_dest, _ai_sample_key)
+
+        # Заглушка падает — это ошибка с последними строками, а не «готово».
+        _ai_bad = _ai_tmp / "падающая.py"
+        _ai_bad.write_text(
+            "import sys\nprint('начал')\nprint('сломалось', file=sys.stderr)\n"
+            "sys.exit(3)\n", encoding="utf-8")
+        _ai_m, _ai_e = _ai.launch(_ai_dest, _ai_note, "v3",
+                                  command=[sys.executable, str(_ai_bad)])
+        check(bool(_ai_e) and any("код 3" in x for x in _ai_e),
+              f"падение цикла показывается кодом: {_ai_e[:1]}")
+        check(any("Полный вывод" in x for x in _ai_e),
+              "и сказано, где смотреть полный вывод")
+
+        # Ход: таблицу печатает сам скрипт автора — подложим ему файл.
+        _ai_results = _ai.results_dir(_ai_dest)
+        _ai_results.mkdir(parents=True, exist_ok=True)
+        (_ai_results / "v1.tsv").write_text(
+            "iteration\tcommit\tscore\tdelta\tstatus\tdescription\ttimestamp\n"
+            "0\tabc1234\t48\t+0\tbaseline\tOriginal artifact\t2026-10-07T12:00\n"
+            "1\tdef5678\t52\t+4\tkeep\tправка\t2026-10-07T12:01\n",
+            encoding="utf-8")
+        _ai_m, _ai_e = _ai.history(_ai_dest, "v1")
+        _ai_text = " | ".join(_ai_m)
+        check(not _ai_e and "Keeps: 1" in _ai_text and "Best score: 52" in _ai_text,
+              f"ход читается родной командой автора: {_ai_text[:90]}")
+        check("v1" in _ai.seen_tags(_ai_dest),
+              f"готовые запуски видны в состоянии: {_ai.seen_tags(_ai_dest)}")
+        _ai_m, _ai_e = _ai.history(_ai_dest, "нет-такого")
+        check(any("нет" in x.lower() for x in _ai_m + _ai_e),
+              "у незнакомого тега ход честно пуст")
+
+        # Командная строка — то же, что кнопки: отвечает словами и не врёт.
+        _ai_cli = _ai_root / "tools" / "dbapp" / "auto_improve.py"
+        _ai_cli_env = dict(_ai_os.environ)
+        _ai_cli_env["OPENCODE_CONFIG_DIR"] = str(_ai_dest)
+        _ai_run = _ai_sp.run([sys.executable, str(_ai_cli), "status"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             env=_ai_cli_env, timeout=90)
+        check(_ai_run.returncode == 0 and "Готово к запуску" in _ai_run.stdout,
+              f"командная строка говорит состояние: {_ai_run.stdout.strip()[:60]}")
+        check(_ai_sample_key not in _ai_run.stdout,
+              "и ключ в её вывод не попадает")
+
+        # Снятие: убирается только наша отметка, файлы остаются.
+        _ai_m, _ai_e = _ai.remove(_ai_dest)
+        check(not _ai_e and not _ai.installed(_ai_dest),
+              f"выключение снимает только отметку: {_ai_e}")
+        check(_ai.key_file(_ai_dest).is_file()
+              and _ai.results_dir(_ai_dest).is_dir(),
+              "ключ и папка данных остаются на диске — их убирает человек")
+        _ai_m, _ai_e = _ai.remove(_ai_dest)
+        check(not _ai_e and any("и так выключен" in x for x in _ai_m),
+              "повторное выключение — не ошибка, а «и так выключен»")
+
+        # Окно: галочка снята, кнопка запуска от неё зависит, диалоги собраны.
+        _ai_tab = window.caps_tab
+        check("auto-improve" in _ai_tab.checks
+              and not _ai_tab.checks["auto-improve"].isChecked(),
+              "на вкладке opencode галочка auto-improve есть и снята по умолчанию")
+        check(not _ai_tab.btn_ai_run.isEnabled(),
+              "кнопка «Улучшить файл…» выключена, пока галочка снята")
+        _ai_tab.checks["auto-improve"].setChecked(True)
+        check(_ai_tab.btn_ai_run.isEnabled(),
+              "и включается вместе с галочкой")
+        _ai_tab.checks["auto-improve"].setChecked(False)
+        check(not _ai_tab.btn_ai_run.isEnabled(),
+              "а со снятой галочкой цикл снова не запускается")
+        for _ai_attr in ("btn_ai_key_edit", "btn_ai_check", "btn_ai_history",
+                         "ai_key_hint", "ai_hint"):
+            check(hasattr(_ai_tab, _ai_attr),
+                  f"на вкладке есть орган управления: {_ai_attr}")
+        _ai_dialog = _ai_app.AutoImproveDialog()
+        _ai_values = _ai_dialog.values()
+        check(_ai_values["tag"] == "" and _ai_values["criteria"] == "",
+              f"диалог начинает с пустых полей: {_ai_values}")
+        _ai_dialog.artifact.setText(str(_ai_note))
+        _ai_dialog._tag_from_file()
+        check(_ai_dialog.values()["tag"] == "письмо",
+              f"тег подставляется из имени файла: {_ai_dialog.values()['tag']!r}")
+        check(_ai_dialog.criteria.count() >= 1
+              and _ai_dialog.criteria.itemData(0) == "",
+              "в списке рубрик есть «без рубрики» — рубрику можно не писать")
+        check("git add -A" in _ai_readme and "improve/<тег>" in _ai_readme,
+              "в README сказано и про `git add -A`, и про ветку improve/<тег>")
+        _ai_dialog.close()
+    finally:
+        if _ai_dest is not None:
+            _ai.key_file(_ai_dest).unlink(missing_ok=True)
+        if _ai_saved_env is None:
+            _ai_os.environ.pop("OPENCODE_CONFIG_DIR", None)
+        else:
+            _ai_os.environ["OPENCODE_CONFIG_DIR"] = _ai_saved_env
+        for _ai_name, _ai_old in zip(("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+                                     _ai_saved_key):
+            if _ai_old is not None:
+                _ai_os.environ[_ai_name] = _ai_old
+        shutil.rmtree(_ai_tmp, ignore_errors=True)
 
     # Настройки OBS: сервер включён только при закрытой студии.
     _on, _port, _pw_in_obs, _path = bridges.obs_state()

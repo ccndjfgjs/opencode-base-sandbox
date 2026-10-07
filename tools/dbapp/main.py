@@ -24,15 +24,16 @@ if __package__ in (None, ""):
     import caveman  # type: ignore[import-not-found]
     import dbhub  # type: ignore[import-not-found]
     import lmarena  # type: ignore[import-not-found]
+    import auto_improve  # type: ignore[import-not-found]
     import omniroute  # type: ignore[import-not-found]
     import pxpipe  # type: ignore[import-not-found]
     import rtk  # type: ignore[import-not-found]
     import program_cards  # type: ignore[import-not-found]
     import winget_install  # type: ignore[import-not-found]
 else:  # запуск как модуль
-    from . import (core, ui, mcp_registry, opencode_caps, android_studio, bridges,
-                   browsers, caveman, dbhub, lmarena, omniroute, program_cards,
-                   pxpipe, rtk, winget_install)
+    from . import (core, ui, mcp_registry, opencode_caps, android_studio,
+                   auto_improve, bridges, browsers, caveman, dbhub, lmarena,
+                   omniroute, program_cards, pxpipe, rtk, winget_install)
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
@@ -44,6 +45,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -2684,6 +2686,275 @@ class PxpipeWarningDialog(QDialog):
         box.addLayout(row)
 
 
+class AutoImproveKeyDialog(QDialog):
+    """Ключ модели-судьи Gemini — файлом рядом с настройками.
+
+    Ключ берётся человеком на aistudio.google.com/apikey (ссылка — из
+    README автора auto-improve). Программа его только сохраняет: файлом
+    `auto-improve-key.txt` рядом с настройками opencode, откуда он уезжает
+    в окружение процесса при запуске цикла. В команды, настройки opencode
+    и журналы ключ не попадает — поэтому же он показывается точками.
+    """
+
+    def __init__(self, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.dest = Path(dest)
+        self.messages: list[str] = []
+        self.setWindowTitle("Ключ модели-судьи для auto-improve")
+        self.setMinimumWidth(700)
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "auto-improve оценивает правки отдельной моделью-судьёй Google "
+            "Gemini. Ключ к ней берётся на aistudio.google.com/apikey — "
+            "у автора в README указана именно эта страница; ключ бесплатный, "
+            "но у него есть лимиты на число запросов.",
+            wrap=True,
+        ))
+        box.addWidget(ui.label(
+            "Ключ ляжет файлом " + auto_improve.KEY_NAME + " рядом с "
+            "настройками opencode и в репозиторий не попадёт. В команды и "
+            "журнал он тоже не записывается: программа кладёт его в "
+            "окружение процесса. Проверкой ключа будет первый запуск "
+            "цикла — в интернет за этим программа не ходит.",
+            kind="dim",
+            wrap=True,
+        ))
+
+        self.key = QLineEdit()
+        self.key.setPlaceholderText("ключ Gemini (начинается с AIza…)")
+        self.key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key.setToolTip(
+            "Значение ключа. Показывается точками: это секрет, и он должен "
+            "попадать в журнал как можно реже"
+        )
+        self.show_key = QCheckBox("Показать ключ")
+        self.show_key.toggled.connect(
+            lambda on: self.key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        box.addWidget(self.key)
+        box.addWidget(self.show_key)
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Сохранить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._save)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+    def _save(self) -> None:
+        messages, errors = auto_improve.save_key(self.dest, self.key.text())
+        if errors:
+            self.status.setText("Не записано. " + " ".join(errors))
+            return
+        self.messages = messages
+        self.accept()
+
+
+class AutoImproveDialog(QDialog):
+    """Что именно улучшать — до запуска цикла.
+
+    Здесь выбирается файл, рубрика (свои рубрики автора, свой файл или
+    «без рубрики» с целью одной строкой), тег запуска и ограничения цикла.
+    Внизу прямым текстом сказано главное: скрипт автора сам делает
+    `git add -A`, создаёт ветку `improve/<тег>` и коммитит в неё — основную
+    ветку он не трогает, но незакоммиченные изменения уедут в новую ветку.
+    """
+
+    #: «Без рубрики» — скрипт выведет её из файла; «свой файл» — выбрать
+    #: любой .md на диске.
+    NO_RUBRIC = ""
+    OWN_RUBRIC = "свой"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("auto-improve: что улучшать")
+        self.setMinimumWidth(760)
+        self.own_criteria = ""
+
+        box = QVBoxLayout(self)
+        box.setSpacing(8)
+        box.addWidget(ui.label(
+            "Цикл улучшает один текстовый файл: правки предлагает одна "
+            "модель, оценивает их отдельная модель-судья по рубрике, а в "
+            "работу остаётся только выигравшее. Каждый шаг — отдельный "
+            "коммит в ветке improve/<тег>.",
+            wrap=True,
+        ))
+
+        row_file = QHBoxLayout()
+        row_file.addWidget(QLabel("Файл:   "))
+        self.artifact = QLineEdit()
+        self.artifact.setPlaceholderText("текстовый файл внутри git-репозитория")
+        self.artifact.setToolTip(
+            "Файл должен лежать внутри git-репозитория: улучшения скрипт "
+            "хранит коммитами в ветке improve/<тег>"
+        )
+        self.btn_pick = QPushButton("Выбрать…")
+        self.btn_pick.clicked.connect(self._pick_file)
+        row_file.addWidget(self.artifact, 1)
+        row_file.addWidget(self.btn_pick)
+        box.addLayout(row_file)
+
+        row_rubric = QHBoxLayout()
+        row_rubric.addWidget(QLabel("Рубрика:   "))
+        self.criteria = QComboBox()
+        self.criteria.setToolTip(
+            "Рубрика — markdown с размерами оценок, суммарно 100 баллов. "
+            "Готовые рубрики автора лежат в tools/thirdparty/auto-improve/"
+            "criteria. Без рубрики скрипт выведет её из файла — тогда "
+            "помогает «цель» ниже"
+        )
+        self.criteria.addItem("без рубрики — скрипт подберёт её сам", self.NO_RUBRIC)
+        for path in auto_improve.criteria_files():
+            self.criteria.addItem("рубрика автора: " + path.stem, str(path))
+        self.criteria.addItem("свой файл рубрики…", self.OWN_RUBRIC)
+        self.criteria.currentIndexChanged.connect(self._criteria_changed)
+        row_rubric.addWidget(self.criteria, 1)
+        box.addLayout(row_rubric)
+
+        row_goal = QHBoxLayout()
+        row_goal.addWidget(QLabel("Цель:   "))
+        self.goal = QLineEdit()
+        self.goal.setPlaceholderText(
+            "одной строкой: чего добиваемся (для авто-рубрики)"
+        )
+        row_goal.addWidget(self.goal, 1)
+        box.addLayout(row_goal)
+
+        row_tag = QHBoxLayout()
+        row_tag.addWidget(QLabel("Тег запуска:   "))
+        self.tag = QLineEdit()
+        self.tag.setPlaceholderText("v1 — из него делается ветка improve/v1")
+        row_tag.addWidget(self.tag, 1)
+        box.addLayout(row_tag)
+
+        row_limits = QHBoxLayout()
+        row_limits.addWidget(QLabel("Итераций:"))
+        self.iterations = QSpinBox()
+        self.iterations.setRange(1, auto_improve.MAX_ITERATIONS)
+        self.iterations.setValue(auto_improve.DEFAULT_ITERATIONS)
+        row_limits.addWidget(self.iterations)
+        row_limits.addWidget(QLabel("   Кандидатов за раунд:"))
+        self.candidates = QSpinBox()
+        self.candidates.setRange(1, 10)
+        self.candidates.setValue(auto_improve.DEFAULT_CANDIDATES)
+        row_limits.addWidget(self.candidates)
+        row_limits.addWidget(QLabel("   Порог остановки:"))
+        self.threshold = QSpinBox()
+        self.threshold.setRange(50, 100)
+        self.threshold.setValue(auto_improve.DEFAULT_THRESHOLD)
+        row_limits.addWidget(self.threshold)
+        row_limits.addWidget(QLabel("   Оценок на вариант:"))
+        self.eval_runs = QSpinBox()
+        self.eval_runs.setRange(1, 5)
+        self.eval_runs.setValue(auto_improve.DEFAULT_EVAL_RUNS)
+        row_limits.addWidget(self.eval_runs)
+        row_limits.addStretch(1)
+        box.addLayout(row_limits)
+
+        box.addWidget(ui.label(auto_improve.BRANCH_WARNING, wrap=True))
+        box.addWidget(ui.label(auto_improve.COST_WARNING, kind="dim", wrap=True))
+
+        self.status = ui.label("", wrap=True)
+        box.addWidget(self.status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("Запустить")
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self._accept)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        box.addLayout(row)
+
+        # Выбор файла — через системный диалог; тег подставляется из имени.
+        self.artifact.textChanged.connect(self._tag_from_file)
+
+    def _pick_file(self) -> None:
+        start = self.artifact.text().strip() or str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Файл для улучшения",
+            str(Path(start).parent if Path(start).parent.is_dir() else Path.home()),
+            "Текст и код (*.md *.txt *.py *.json *.yaml *.yml);;Все файлы (*)",
+        )
+        if chosen:
+            self.artifact.setText(chosen)
+
+    def _tag_from_file(self) -> None:
+        """Тег по умолчанию — имя файла без расширения, без запретных знаков."""
+        if self.tag.text().strip():
+            return
+        stem = Path(self.artifact.text().strip()).stem
+        clean = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in stem)
+        if clean:
+            self.tag.setText(clean[:40])
+
+    def _criteria_changed(self) -> None:
+        if self.criteria.currentData() != self.OWN_RUBRIC:
+            return
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Файл рубрики", str(Path.home()), "Рубрика (*.md);;Все файлы (*)"
+        )
+        if chosen:
+            self.own_criteria = chosen
+            self.criteria.setItemText(
+                self.criteria.currentIndex(), "свой файл: " + Path(chosen).name
+            )
+        else:
+            self.criteria.setCurrentIndex(0)
+
+    def values(self) -> dict:
+        """Выбор человека. Проверки полей — тут же, до запуска."""
+        item = self.criteria.currentData()
+        own_needed = item == self.OWN_RUBRIC
+        criteria = self.own_criteria if own_needed else str(item or "")
+        return {
+            "artifact": self.artifact.text().strip(),
+            "criteria": criteria,
+            "own_needed": own_needed,
+            "goal": self.goal.text().strip(),
+            "tag": self.tag.text().strip(),
+            "max_iterations": self.iterations.value(),
+            "candidates": self.candidates.value(),
+            "threshold": self.threshold.value(),
+            "eval_runs": self.eval_runs.value(),
+        }
+
+    def _accept(self) -> None:
+        values = self.values()
+        if not values["artifact"]:
+            self.status.setText("Не выбран файл для улучшения.")
+            return
+        if not Path(values["artifact"]).is_file():
+            self.status.setText("Такого файла нет: " + values["artifact"])
+            return
+        if values["own_needed"] and not values["criteria"]:
+            self.status.setText(
+                "Выбрана своя рубрика, но файл рубрики не указан — повтори выбор."
+            )
+            return
+        problem = auto_improve.tag_problem(values["tag"])
+        if problem:
+            self.status.setText(problem)
+            return
+        self.accept()
+
+
 class LmarenaTokenDialog(QDialog):
     """Токен арены: вписать свежую куку `arena-auth-prod-v1`.
 
@@ -2781,6 +3052,7 @@ class CapsTab(ScrollPage):
         "rtk": "rtk — вывод команд короче (нужен rtk в PATH)",
         "caveman": "caveman — ответы короче (правила в AGENTS.md)",
         "pxpipe": "pxpipe — запросы картинками (локальный прокси)",
+        "auto-improve": "auto-improve — улучшение текста (цикл с судьёй)",
     }
 
     def __init__(self, parent=None) -> None:
@@ -2843,6 +3115,17 @@ class CapsTab(ScrollPage):
                     "кнопкой ниже, иначе программа ничего не впишет"
                 )
                 box.toggled.connect(self._px_toggled)
+            if name == "auto-improve":
+                box.setToolTip(
+                    "Сторонний скрипт автора crimeacs (MIT): улучшает один "
+                    "текстовый файл точечными правками, а оценивает их "
+                    "отдельная модель-судья Gemini по рубрике. Нужны ключ "
+                    "судьи (кнопка «Вписать ключ судьи»), git и файл внутри "
+                    "git-репозитория. Цикл сам коммитит в ветку improve/<тег> "
+                    "и тратит токены — включай осознанно. Кнопка «Улучшить "
+                    "файл…» работает, только когда галочка отмечена"
+                )
+                box.toggled.connect(self._ai_toggled)
             what_layout.addWidget(box)
             self.checks[name] = box
         # Уровень caveman — единственная возможность с выбором внутри
@@ -2919,6 +3202,60 @@ class CapsTab(ScrollPage):
         row_px_btns.addStretch(1)
         px_layout.addLayout(row_px_btns)
         what_layout.addWidget(box_px)
+        # --- auto-improve: тоже не только галочка. Ключ судьи, проверка
+        # окружения и запуск цикла — свои кнопки, а «Улучшить файл…» снята,
+        # пока галочка не отмечена: по умолчанию цикл не запускается.
+        box_ai = QGroupBox("auto-improve — улучшить файл циклом с судьёй")
+        ai_layout = QVBoxLayout(box_ai)
+        ai_layout.addWidget(ui.label(
+            "Сторонний скрипт автора crimeacs (лицензия MIT): он улучшает "
+            "один текстовый файл точечными правками, оценивает их отдельной "
+            "моделью-судьёй Gemini по рубрике и оставляет только выигравшее. "
+            "Каждый оставленный шаг — коммит в ветке improve/<тег>: история "
+            "коммитов и есть журнал улучшений. Файл должен лежать внутри "
+            "git-репозитория.",
+            kind="dim",
+            wrap=True,
+        ))
+        self.btn_ai_key_edit = QPushButton("Вписать ключ судьи")
+        self.btn_ai_key_edit.setToolTip(
+            "Ключ Gemini для модели-судьи: лежит файлом рядом с настройками "
+            "opencode (в репозиторий не попадает); уезжает в окружение "
+            "процесса при запуске цикла и не показывается в журнале"
+        )
+        row_ai_key = QHBoxLayout()
+        row_ai_key.addWidget(QLabel("Ключ судьи:   "))
+        self.ai_key_hint = ui.label("", kind="dim", wrap=True)
+        row_ai_key.addWidget(self.ai_key_hint, 1)
+        row_ai_key.addWidget(self.btn_ai_key_edit)
+        ai_layout.addLayout(row_ai_key)
+        self.ai_hint = ui.label("", kind="dim", wrap=True)
+        ai_layout.addWidget(self.ai_hint)
+        row_ai_btns = QHBoxLayout()
+        self.btn_ai_check = QPushButton("Проверить окружение")
+        self.btn_ai_check.setToolTip(
+            "Проверка без запуска: на месте ли копия скрипта, есть ли git, "
+            "умеет ли Python библиотеку requests и вписан ли ключ судьи. "
+            "Ничего не меняет и никуда не звонит"
+        )
+        self.btn_ai_run = QPushButton("Улучшить файл…")
+        self.btn_ai_run.setToolTip(
+            "Запустить цикл: выбирается файл, рубрика, цель и ограничения. "
+            "Скрипт сам создаст ветку improve/<тег> и будет коммитить в неё — "
+            "запускай на копии проекта или в отдельной ветке. Кнопка доступна "
+            "только при отмеченной галочке auto-improve"
+        )
+        self.btn_ai_history = QPushButton("Показать ход")
+        self.btn_ai_history.setToolTip(
+            "Таблица хода завершённого запуска: сколько итераций, что "
+            "оставлено, что откатили. История — из папки данных рядом с "
+            "настройками, а не из интернета"
+        )
+        for button in (self.btn_ai_check, self.btn_ai_run, self.btn_ai_history):
+            row_ai_btns.addWidget(button)
+        row_ai_btns.addStretch(1)
+        ai_layout.addLayout(row_ai_btns)
+        what_layout.addWidget(box_ai)
         try:
             nagents = len(list((core.app_root() / "tools" / "agents").glob("*.md")))
             if nagents:
@@ -3325,11 +3662,18 @@ class CapsTab(ScrollPage):
         self.btn_px_stop.clicked.connect(self._px_stop)
         self.btn_px_check.clicked.connect(self._px_check)
         self.btn_px_stats.clicked.connect(self._px_stats)
+        self.btn_ai_key_edit.clicked.connect(self._ai_key)
+        self.btn_ai_check.clicked.connect(self._ai_check)
+        self.btn_ai_run.clicked.connect(self._ai_run)
+        self.btn_ai_history.clicked.connect(self._ai_history)
         self.reg_table.currentCellChanged.connect(
             lambda *_: self._reg_show_detail()
         )
         self._fill_caps_skills()
         self._reg_load()
+        # «Улучшить файл…» доступна, только когда галочка auto-improve
+        # отмечена: по умолчанию цикл запускать нечем.
+        self._ai_toggled(self.checks["auto-improve"].isChecked())
         self._refresh()
 
         outer.activate()
@@ -4460,6 +4804,32 @@ class CapsTab(ScrollPage):
                     "pxpipe: прокси не отвечает — пока он не запущен, "
                     "включение ничего не впишет в настройки."
                 )
+        # Строка про auto-improve: цикл не пойдёт без ключа, git и requests,
+        # и сказать об этом надо до нажатия, а не после.
+        try:
+            ai = auto_improve.check(dest)
+        except Exception:
+            ai = {}
+        try:
+            ai_tags = auto_improve.seen_tags(dest)
+        except Exception:
+            ai_tags = []
+        if ai:
+            if ai.get("ready"):
+                notes.append(
+                    "auto-improve: готов к запуску, "
+                    + auto_improve.key_status(dest)
+                    + (f"; ход: {len(ai_tags)}" if ai_tags else "")
+                    + "."
+                )
+            else:
+                notes.append(
+                    "auto-improve: не готов — "
+                    + "; ".join(ai.get("missing") or []) + "."
+                )
+            self.ai_key_hint.setText(auto_improve.key_status(dest) + ".")
+            self.ai_hint.setText(auto_improve.status_text(dest))
+            self.btn_ai_run.setEnabled(bool(self.checks["auto-improve"].isChecked()))
         # Список источников для pxpipe: читаем здесь, в главном потоке.
         try:
             choices = pxpipe.provider_choices(dest)
@@ -4603,6 +4973,138 @@ class CapsTab(ScrollPage):
             return rtk.measure()
 
         self._start(job, "measure")
+
+    def _ai_toggled(self, on: bool) -> None:
+        """Галочка auto-improve разрешает кнопку «Улучшить файл…».
+
+        Сама галочка ничего не блокирует и не запускает: она лишь открывает
+        кнопку. Всё остальное — проверка окружения перед записью и
+        предупреждения перед циклом.
+        """
+        button = getattr(self, "btn_ai_run", None)
+        if button is not None:
+            button.setEnabled(bool(on))
+        if on:
+            self.log.add(
+                "auto-improve отмечен. Цикл тратит токены и коммитит в ветку "
+                "improve/<тег> — запускай на копии проекта или в отдельной ветке.",
+                "warn",
+            )
+
+    def _ai_dest(self) -> Path | None:
+        """Папка настроек для кнопок auto-improve. None — не выбрана."""
+        dest = self._dest()
+        if dest is None:
+            self._warn("Не выбрана папка настроек opencode.")
+        return dest
+
+    def _ai_key(self) -> None:
+        """Спрашивает ключ судьи и кладёт его рядом с настройками."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        dialog = AutoImproveKeyDialog(dest, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for line in dialog.messages:
+            self.log.add(line, "ok")
+        self._refresh()
+
+    def _ai_check(self) -> None:
+        """Проверка окружения: скрипт, git, requests, ключ. Ничего не меняет."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+
+        def job(progress):
+            data = auto_improve.check(dest)
+            lines = [auto_improve.status_text(dest)]
+            if data.get("script_ok"):
+                rubrics = auto_improve.criteria_files()
+                lines.append(
+                    f"Копия скрипта на месте, рубрик для выбора: {len(rubrics)}."
+                )
+            tags = auto_improve.seen_tags(dest)
+            lines.append(
+                "Готовых запусков в папке данных: " + (str(len(tags)) if tags else "нет")
+                + (" (" + ", ".join(tags[:5]) + ")" if tags else "")
+            )
+            errors = [] if data.get("ready") else list(data.get("missing") or [])
+            return lines, errors
+
+        self._start(job, "auto-improve")
+
+    def _ai_run(self) -> None:
+        """Запускает цикл улучшения выбранного файла.
+
+        Порядок такой: диалог с файлом, рубрикой и ограничениями, затем
+        подтверждение — и только потом цикл. Само подтверждение говорит про
+        ветку improve/<тег> и про то, что незакоммиченные правки уедут в неё.
+        """
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        if not self.checks["auto-improve"].isChecked():
+            self._warn(
+                "Сначала отметь галочку «auto-improve — улучшение текста»: "
+                "по умолчанию цикл выключен."
+            )
+            return
+        dialog = AutoImproveDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        answer = QMessageBox.question(
+            self,
+            "Запуск auto-improve",
+            auto_improve.BRANCH_WARNING
+            + "\n\nВетка: improve/"
+            + values["tag"]
+            + "\nФайл: "
+            + values["artifact"]
+            + "\n\nПродолжить?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def job(progress):
+            return auto_improve.launch(
+                dest,
+                Path(values["artifact"]),
+                values["tag"],
+                criteria=values["criteria"],
+                goal=values["goal"],
+                max_iterations=values["max_iterations"],
+                candidates=values["candidates"],
+                threshold=values["threshold"],
+                eval_runs=values["eval_runs"],
+                progress=progress,
+            )
+
+        self._start(job, "auto-improve")
+
+    def _ai_history(self) -> None:
+        """Показывает ход завершённого запуска — таблицу печатает сам скрипт."""
+        dest = self._ai_dest()
+        if dest is None:
+            return
+        tags = auto_improve.seen_tags(dest)
+        default = tags[0] if tags else ""
+        tag, ok = QInputDialog.getText(
+            self,
+            "Ход auto-improve",
+            "Тег запуска (ветка improve/<тег>):"
+            + (f"\nГотовые: {', '.join(tags[:8])}" if tags else "\nГотовых запусков пока нет."),
+            text=default,
+        )
+        if not ok or not tag.strip():
+            return
+        chosen = tag.strip()
+
+        def job(progress):
+            return auto_improve.history(dest, chosen, progress=progress)
+
+        self._start(job, "auto-improve")
 
     def _px_confirm(self) -> bool:
         """Спрашивает согласие на сжатие запросов картинками.

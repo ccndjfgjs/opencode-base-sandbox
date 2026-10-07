@@ -41,13 +41,15 @@ CAPS = (
     ("rtk", "rtk — вывод команд короче"),
     ("caveman", "caveman — ответы короче"),
     ("pxpipe", "pxpipe — запросы картинками"),
+    ("auto-improve", "auto-improve — улучшение текста"),
 )
 
 #: Что вкладка «opencode» спрашивает у человека: только расширения.
 #: Мостов здесь нет — они едут с базой и включаются всегда.
-#: rtk, caveman и pxpipe — не MCP-серверы и не мосты: rtk кладёт в настройки
-#: плагин, caveman — правила в AGENTS.md, pxpipe — запись провайдера,
-#: смотрящую на локальный прокси. Все трое живут в tools/thirdparty
+#: rtk, caveman, pxpipe и auto-improve — не MCP-серверы и не мосты: rtk
+#: кладёт в настройки плагин, caveman — правила в AGENTS.md, pxpipe — запись
+#: провайдера на локальный прокси, auto-improve живёт отметкой в манифесте
+#: и копией скрипта в tools/thirdparty. Все четверо живут в tools/thirdparty
 #: и в реестр mcp-registry.json не попадают.
 CAPS_CHOICES = (
     ("voice", "Команда /голос"),
@@ -56,13 +58,14 @@ CAPS_CHOICES = (
     ("rtk", "rtk — вывод команд короче"),
     ("caveman", "caveman — ответы короче"),
     ("pxpipe", "pxpipe — запросы картинками"),
+    ("auto-improve", "auto-improve — улучшение текста"),
 )
 
 #: Галочки, которые при открытии вкладки стоят снятыми: у rtk нужен
-#: бинарник в PATH, caveman меняет стиль ответов, а pxpipe и вовсе
-#: переписывает запрос картинками и без запущенного прокси не работает.
-#: Включать такое молча, «по умолчанию», нельзя.
-CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe")
+#: бинарник в PATH, caveman меняет стиль ответов, pxpipe переписывает
+#: запрос картинками, а auto-improve тратит токены и коммитит в репозиторий
+#: файла. Включать такое молча, «по умолчанию», нельзя.
+CAPS_OFF_BY_DEFAULT = ("rtk", "caveman", "pxpipe", "auto-improve")
 
 #: Что подставляется всегда, без галочки: мосты — часть базы, а не опция.
 CAPS_ALWAYS = ("pc", "ncp")
@@ -1036,6 +1039,14 @@ def install_caps(
         messages += m_px
         errors += e_px
 
+    # --- auto-improve: свой модуль. Он проверяет окружение целиком (копия
+    # скрипта, git, requests у Python, ключ судьи) и при нехватке ничего не
+    # записывает: без ключа и git цикл всё равно не пойдёт.
+    if "auto-improve" in selection:
+        m_ai, e_ai = _auto_improve_module().install(dest, progress=progress)
+        messages += m_ai
+        errors += e_ai
+
     if (
         "pc" in selection
         or "ncp" in selection
@@ -1045,6 +1056,7 @@ def install_caps(
         or "rtk" in selection
         or "caveman" in selection
         or "pxpipe" in selection
+        or "auto-improve" in selection
     ):
         say("Перезапустите opencode: настройки читаются при старте.")
     return messages, errors
@@ -1069,6 +1081,13 @@ def _pxpipe_module():
     import pxpipe  # noqa: PLC0415 — рядом лежит, круга нет
 
     return pxpipe
+
+
+def _auto_improve_module():
+    """Модуль auto-improve рядом."""
+    import auto_improve  # noqa: PLC0415 — рядом лежит, круга нет
+
+    return auto_improve
 
 
 def place_file(
@@ -1183,6 +1202,13 @@ def remove_caps(
         messages += m_px
         errors += e_px
 
+    # --- auto-improve: снимается только наша отметка в манифесте. Ключ и
+    # папка данных остаются на диске — их убирает человек, если захочет.
+    if "auto-improve" in selection:
+        m_ai, e_ai = _auto_improve_module().remove(dest, progress=progress)
+        messages += m_ai
+        errors += e_ai
+
     # --- обход блокировок: убирает свой модуль сам, в запас, не в корзину.
     if "antiblock" in selection:
         try:
@@ -1242,6 +1268,10 @@ def caps_status(dest: Path) -> dict[str, bool]:
         pass
     try:
         status["pxpipe"] = bool(_pxpipe_module().status(dest).get("installed"))
+    except Exception:
+        pass
+    try:
+        status["auto-improve"] = bool(_auto_improve_module().installed(dest))
     except Exception:
         pass
     _ = manifest
