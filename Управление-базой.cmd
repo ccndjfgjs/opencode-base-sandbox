@@ -39,10 +39,59 @@ for %%P in (pythonw.exe) do call :try_exe "%%~$PATH:P"
 
 if not defined PYW goto :nopython
 
+rem --- запуск окна программы -------------------------------------------
+rem Всё это окно консоли - единственное, что открывается при запуске.
+rem Программа стартует сразу, а консоль живёт до проверки: если окно
+rem программы открылось - консоль закрывается сама и больше не мешает.
+rem Если окно не открылось - консоль остаётся и показывает причину.
+rem
+rem Признак «программа стартовала» берём не из внешнего окна, а из её
+rem собственной метки единственного экземпляра: файл создаётся в
+run() при старте. Так проверка не зависит от заголовков окон и от того,
+rem на каком языке печатает cmd.
+
 pushd "%APPDIR%"
 start "" "%PYW%" -X utf8 "%APP%"
 popd
-exit /b 0
+
+set "LOCK=%TEMP%\opencode-base-dbapp-%USERNAME%.lock"
+set /a _waited=0
+
+:await_window
+timeout /t 1 /nobreak >nul
+set /a _waited+=1
+if not exist "%LOCK%" goto :wait_more
+set "LOCKPID="
+set /p LOCKPID=<"%LOCK%"
+if not defined LOCKPID goto :wait_more
+tasklist /fi "PID eq %LOCKPID%" /nh >nul 2>&1
+if errorlevel 1 goto :wait_more
+goto :window_open
+
+:wait_more
+if %_waited% lss 20 goto :await_window
+goto :no_window
+
+:window_open
+rem Окно открылось: консоль закрывается, дальше работает только программа.
+endlocal & exit /b 0
+
+:no_window
+echo.
+echo Окно программы не открылось за 20 секунд.
+echo Чаще всего это означает, что не запустился Python с окнами PyQt6.
+echo Ниже - причина прямо из интерпретатора, если её удалось получить:
+echo.
+set "PYCONSOLE=%PYW:pythonw.exe=python.exe%"
+"%PYCONSOLE%" -X utf8 "%APP%"
+echo.
+echo Программа завершилась с кодом %ERRORLEVEL%.
+echo.
+echo Если окно всё-таки открылось - закрой лишние экземпляры и запусти
+echo программу ещё раз: при втором запуске она не откроется заново.
+echo.
+pause
+endlocal & exit /b 1
 
 :try_dir
 rem Проверяет Python в папке: сначала обычный, потом оконный.
