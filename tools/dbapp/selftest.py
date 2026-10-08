@@ -8049,6 +8049,75 @@ def main() -> int:
     _main_name = (_root / "tools" / "dbapp" / "make_shortcut.py")
     check(_main_name.is_file(), "скрипт создания ярлыка на месте")
 
+    # ---- 8д. Ревьюер: три отказа, которые выглядели одинаково
+    #
+    # Проверки добавлены после живого разбора: все три пути возвращали
+    # код 1 и не печатали ничего, поэтому по коду возврата их было не
+    # отличить друг от друга, а по журналу видно было не всегда.
+    echo("\n--- 8ж. Второй ревьюер не должен молчать об отказе ---")
+    _qr_path = _root / "tools" / "dbapp" / "qwen_review.py"
+    check(_qr_path.is_file(), "модуль ревьюера на месте")
+    _qr_src = _qr_path.read_text(encoding="utf-8")
+
+    # 1. Ключ провайдера в настройках opencode — ссылка {env:ИМЯ}, а не
+    #    ${ИМЯ}. Разбирался только второй вид, и ссылка уходила в
+    #    провайдера как есть: тот отвечал 401 «Invalid API key».
+    #    Проверяем по-настоящему: подставляем свою переменную окружения.
+    _qr_dir = Path(tempfile.mkdtemp(prefix="selftest-qwenkey-"))
+    try:
+        (_qr_dir / "opencode.jsonc").write_text(
+            '{"provider": {"тест-": {"npm": "@ai-sdk/openai-compatible",'
+            ' "apiKey": "{env:SELFTEST_QR_KEY}"},'
+            ' "прямой-": {"apiKey": "просто-ключ"},'
+            ' "нет-": {"npm": "@ai-sdk/openai-compatible"}}}',
+            encoding="utf-8")
+        if str(_root / "tools" / "dbapp") not in sys.path:
+            sys.path.insert(0, str(_root / "tools" / "dbapp"))
+        import qwen_review as _qr
+        import os as _qr_os  # noqa: PLC0415 — по образцу остальных проверок
+        _was = _qr_os.environ.get("SELFTEST_QR_KEY")
+        _qr_os.environ["SELFTEST_QR_KEY"] = "подставленный-ключ"
+        try:
+            check(_qr.provider_key(_qr_dir, "тест-") == "подставленный-ключ",
+                  "ключ по ссылке {env:ИМЯ} берётся из переменной окружения")
+            check(_qr.provider_key(_qr_dir, "прямой-") == "просто-ключ",
+                  "ключ, записанный строкой, берётся как есть")
+            check(_qr.provider_key(_qr_dir, "нет-") == "",
+                  "у провайдера без apiKey ключ пустой, а не ссылка")
+        finally:
+            if _was is None:
+                _qr_os.environ.pop("SELFTEST_QR_KEY", None)
+            else:
+                _qr_os.environ["SELFTEST_QR_KEY"] = _was
+    except ImportError:
+        check(False, "модуль ревьюера импортируется для проверки ключа")
+    finally:
+        shutil.rmtree(_qr_dir, ignore_errors=True)
+
+    # 2. Ошибка, которую команда вернула, но не показала, обязана быть
+    #    напечатана: иначе «код 1 и ни слова» — это не диагностика.
+    check("def done(errors" in _qr_src,
+          "у команд есть страховка, печатающая непоказанную ошибку")
+    check(_qr_src.count("return done(errors)") >= 5,
+          "страховка стоит на всех командах, а не на одной")
+
+    # 3. Ответ провайдера с ценой содержит знак рубля, которого нет в
+    #    cp1251: без перекодировки print() ронял программу на ровном
+    #    месте вместо того, чтобы показать ошибку.
+    check("reconfigure(encoding='utf-8'" in _qr_src,
+          "консоль ревьюера переводится в UTF-8 перед печатью ответа")
+    check("if _stream is not None" in _qr_src,
+          "перекодировка не падает под pythonw, где вывода нет")
+
+    # 4. Ревьюер — консольный агент, а не сервер: в реестре мостов его
+    #    быть не должно, иначе он превратится в лишний MCP-сервер.
+    _qr_reg = core.app_root() / "mcp-registry.json"
+    check(_qr_reg.is_file(), "реестр мостов на месте — его и проверяем")
+    if _qr_reg.is_file():
+        _qr_txt = _qr_reg.read_text(encoding="utf-8")
+        check("qwen" not in _qr_txt.lower(),
+              "ревьюер не записан в реестр мостов: он не MCP-сервер")
+
     # ---- 8г. Обновление скилла в уже созданной базе
     echo("\n--- 8г. Скилл, который в мастере, но только в старой базе ---")
     _src_sk = core.program_root()

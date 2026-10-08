@@ -40,6 +40,17 @@ import shutil
 import subprocess
 import sys
 import time
+# Консоль Windows по умолчанию живёт в однобайтовой кодировке (cp1251),
+# и в ней нет, например, знака рубля. Ответ провайдера с ценой приходил
+# с символом \u20bd, print() падал с UnicodeEncodeError — и вместо внятной
+# ошибки человек получал traceback. Под pythonw sys.stdout равен None, там
+# .reconfigure() не существует: проверяем и это (найдено живьём).
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
 from pathlib import Path
 
 #: Откуда берётся ревьюер и по какой лицензии.
@@ -454,6 +465,14 @@ def provider_key(dest: Path, provider_id: str) -> str:
 
     Значение не печатается и не пишется в наши файлы: в состояние попадает
     лишь имя провайдера и модель.
+
+    В настройках opencode ключ записан двумя способами: прямо строкой либо
+    ссылкой на переменную окружения. Ссылка у opencode выглядит как
+    `{env:ИМЯ}`, а не как `${ИМЯ}`. Разбирался только второй вид, и ссылка
+    уходила в Qwen Code как есть: провайдер вместо ключа получал строку
+    «{env:...}» и отвечал 401 Invalid API key. Поэтому разбираем оба вида,
+    а пустое значение отдаём пустым — вызывающий сам скажет об этом
+    человеку.
     """
     try:
         text = _config(dest).read_text(encoding="utf-8")
@@ -462,9 +481,11 @@ def provider_key(dest: Path, provider_id: str) -> str:
     entry = _entry_text(text, provider_id)
     if not entry:
         return ""
-    key = _str_field(entry, "apiKey")
+    key = _str_field(entry, "apiKey").strip()
+    if key.startswith("{env:") and key.endswith("}"):
+        return os.environ.get(key[5:-1].strip(), "").strip()
     if key.startswith("${") and key.endswith("}"):
-        return os.environ.get(key[2:-1], "")
+        return os.environ.get(key[2:-1].strip(), "").strip()
     return key
 
 
@@ -888,9 +909,23 @@ def run(dest: Path, project: Path, prompt: str, diff_text: str,
     say("Запускаю ревьюера: " + " ".join(cmd[:4]) + " …")
     log = _open_log(dest, "ревью")
     env = run_env(dest)
-    key = provider_key(dest, str(selection.get("provider") or ""))
-    if key:
-        env["OPENAI_API_KEY"] = key
+    provider_id = str(selection.get("provider") or "")
+    key = provider_key(dest, provider_id)
+    if not key:
+        # Раньше запуск уходил в провайдера без ключа и тот отвечал 401
+        # «Invalid API key» — выглядело так, будто сломан ревьюер. Дешевле
+        # и честнее сказать сразу, где ключа нет.
+        if log:
+            log.write("Запуск без ключа: у провайдера «"
+                      + (provider_id or "?") + "» нет apiKey в настройках"
+                      + " opencode.\n")
+            log.close()
+        return messages, [
+            "У провайдера «" + (provider_id or "?") + "» нет ключа: в "
+            "настройках opencode не задан apiKey или не задана переменная "
+            "окружения, на которую он ссылается. Ревью не запускалось."
+        ], {}
+    env["OPENAI_API_KEY"] = key
     base = str(selection.get("base_url") or "")
     if base:
         env["OPENAI_BASE_URL"] = base
@@ -1138,6 +1173,32 @@ def _main(argv: list[str]) -> int:
     """Командная строка — то же, что кнопки в окне."""
     import argparse  # noqa: PLC0415 — нужен только здесь
 
+    shown: list[str] = []
+
+    def say(text: str) -> None:
+        """Как _say, но запоминаем напечатанное: понадобится в done()."""
+        shown.append(text)
+        _say(text)
+
+    def done(errors: list[str]) -> int:
+        """Код возврата и страховка от молчаливого отказа.
+
+        Ошибка, возвращённая из команды, по замыслу ещё не показана:
+        команды сообщают через progress (say), а этот список — то,
+        что до сих пор никто не вывел на экран. Раньше он просто
+        терялся: галочка ревьюера снята, git diff не собрался или
+        провайдер вернул 401 — и всё это выглядело как «код 1 и
+        ни одного слова». Печатаем только то, чего ещё не было видно,
+        чтобы не задваивать уже показанное.
+
+        Строка возврата ниже написана в обход подмены в _main: если
+        вписать её раньше, замена накрыла бы её же и вышла рекурсия.
+        """
+        for item in errors:
+            if item not in shown:
+                _say(item)
+        return 1 if errors else 0
+
     parser = argparse.ArgumentParser(
         description="qwen-review — второй агент-ревьюер (Qwen Code) над git diff.",
     )
@@ -1189,26 +1250,26 @@ def _main(argv: list[str]) -> int:
                 _say("    модели: " + ", ".join(item["models"][:10]))
         return 0
     if args.what == "choose":
-        messages, errors = choose(dest, args.provider, args.model, progress=_say)
-        return 1 if errors else 0
+        messages, errors = choose(dest, args.provider, args.model, progress=say)
+        return done(errors)
     if args.what == "deploy":
-        messages, errors = deploy(dest, progress=_say)
-        return 1 if errors else 0
+        messages, errors = deploy(dest, progress=say)
+        return done(errors)
     if args.what == "install":
-        messages, errors = install(dest, progress=_say)
-        return 1 if errors else 0
+        messages, errors = install(dest, progress=say)
+        return done(errors)
     if args.what == "remove":
-        messages, errors = remove(dest, progress=_say)
-        return 1 if errors else 0
+        messages, errors = remove(dest, progress=say)
+        return done(errors)
     if args.what == "forget":
         messages, errors = clear_debate(dest)
-        return 1 if errors else 0
+        return done(errors)
     if args.what == "review":
         messages, errors = review(
             dest, Path(args.project), args.base, reply=args.reply,
-            rounds=args.rounds, progress=_say,
+            rounds=args.rounds, progress=say,
         )
-        return 1 if errors else 0
+        return done(errors)
     return 2
 
 
